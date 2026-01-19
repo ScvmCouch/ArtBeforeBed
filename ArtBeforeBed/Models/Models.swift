@@ -8,10 +8,11 @@ enum MuseumSelection: String, CaseIterable, Identifiable {
     case aic = "Chicago"
     case cma = "Cleveland"
     case getty = "Getty"
+    case rijks = "Rijksmuseum"
 
     var id: String { rawValue }
 
-    /// Provider ID prefixes used in IDs: "met:123", "aic:456", "cma:789", "getty:uuid"
+    /// Provider ID prefixes used in IDs: "met:123", "aic:456", "cma:789", "getty:uuid", "rijks:123"
     var allowedProviderIDs: Set<String>? {
         switch self {
         case .mixed:
@@ -25,6 +26,8 @@ enum MuseumSelection: String, CaseIterable, Identifiable {
             return ["cma"]
         case .getty:
             return ["getty"]
+        case .rijks:
+            return ["rijks"]
         }
     }
 }

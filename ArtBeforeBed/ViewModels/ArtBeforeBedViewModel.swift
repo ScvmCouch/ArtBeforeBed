@@ -54,7 +54,8 @@ final class ArtBeforeBedViewModel: ObservableObject {
         MetProvider(),
         AICProvider(),
         CMAProvider(),
-        GettyProvider()
+        GettyProvider(),
+        RijksmuseumProvider()
     ])
 
 
