@@ -1,11 +1,15 @@
 import Foundation
 import CoreFoundation
 
-/// Getty Provider - IMPROVED VERSION
+/// Getty Provider - IMPROVED VERSION with Weighted Search Balancing
 /// Uses your proven working approach:
 /// 1. SPARQL to discover UUIDs
 /// 2. Linked Art object for metadata
 /// 3. IIIF manifest for images
+///
+/// NEW: Weighted balancing to prevent photograph saturation
+/// - 75% paintings/drawings/prints/watercolors
+/// - 25% photographs (capped)
 final class GettyProvider: MuseumProvider {
 
     let providerID: String = "getty"
@@ -15,6 +19,13 @@ final class GettyProvider: MuseumProvider {
     private let linkedArtObjectBase = "https://data.getty.edu/museum/collection/object"
 
     private let desiredIDsPerBuild = 160
+    
+    // Weighted distribution:
+    // - 120 traditional art forms (75%)
+    // - 40 photographs (25%)
+    private let traditionalArtCount = 120
+    private let photographCount = 40
+    
     private let sparqlBatchSize = 280
     private let maxSparqlRounds = 2
 
@@ -29,27 +40,54 @@ final class GettyProvider: MuseumProvider {
 
         _ = query; _ = medium; _ = geo; _ = period
 
-        DebugLogger.logProviderStart("Getty", query: "SPARQL discovery")
+        DebugLogger.logProviderStart("Getty", query: "SPARQL discovery (weighted)")
 
-        var uuids: Set<String> = []
-
+        // STEP 1: Fetch traditional art (paintings, drawings, prints, watercolors)
+        DebugLogger.log(.info, "Getty: Fetching traditional art forms...")
+        var traditionalUUIDs: Set<String> = []
+        
         for round in 0..<maxSparqlRounds {
-            DebugLogger.log(.info, "Getty: SPARQL round \(round + 1)/\(maxSparqlRounds)")
+            DebugLogger.log(.info, "Getty: Traditional art round \(round + 1)/\(maxSparqlRounds)")
             
-            let batch = try await fetchRandomObjectUUIDs(limit: sparqlBatchSize)
-            batch.forEach { uuids.insert($0) }
+            let batch = try await fetchTraditionalArtUUIDs(limit: sparqlBatchSize)
+            batch.forEach { traditionalUUIDs.insert($0) }
 
-            DebugLogger.log(.success, "Getty: Round \(round + 1) got \(batch.count) candidates, unique total: \(uuids.count)")
+            DebugLogger.log(.success, "Getty: Traditional art round \(round + 1) got \(batch.count) candidates, unique total: \(traditionalUUIDs.count)")
 
-            if uuids.count >= desiredIDsPerBuild { break }
+            if traditionalUUIDs.count >= traditionalArtCount { break }
         }
 
-        guard !uuids.isEmpty else {
-            DebugLogger.log(.error, "Getty: No UUIDs discovered from SPARQL")
+        // STEP 2: Fetch photographs (limited)
+        DebugLogger.log(.info, "Getty: Fetching photographs (limited to \(photographCount))...")
+        var photographUUIDs: Set<String> = []
+        
+        for round in 0..<maxSparqlRounds {
+            DebugLogger.log(.info, "Getty: Photograph round \(round + 1)/\(maxSparqlRounds)")
+            
+            let batch = try await fetchPhotographUUIDs(limit: sparqlBatchSize / 2)
+            batch.forEach { photographUUIDs.insert($0) }
+
+            DebugLogger.log(.success, "Getty: Photograph round \(round + 1) got \(batch.count) candidates, unique total: \(photographUUIDs.count)")
+
+            if photographUUIDs.count >= photographCount { break }
+        }
+
+        // STEP 3: Combine with weighted distribution
+        let selectedTraditional = Array(traditionalUUIDs.shuffled().prefix(traditionalArtCount))
+        let selectedPhotographs = Array(photographUUIDs.shuffled().prefix(photographCount))
+        
+        DebugLogger.log(.success, "Getty: Selected \(selectedTraditional.count) traditional + \(selectedPhotographs.count) photographs")
+
+        guard !selectedTraditional.isEmpty else {
+            DebugLogger.log(.error, "Getty: No traditional art UUIDs discovered from SPARQL")
             throw URLError(.cannotLoadFromNetwork)
         }
 
-        let ids = uuids.shuffled().prefix(desiredIDsPerBuild).map { "\(providerID):\($0)" }
+        // Combine and shuffle all selected UUIDs
+        var allUUIDs = selectedTraditional + selectedPhotographs
+        allUUIDs.shuffle()
+        
+        let ids = allUUIDs.prefix(desiredIDsPerBuild).map { "\(providerID):\($0)" }
 
         DebugLogger.logProviderSuccess("Getty", idCount: ids.count)
         DebugLogger.log(.info, "Getty: Sample IDs: \(ids.prefix(3).joined(separator: ", "))")
@@ -232,16 +270,51 @@ final class GettyProvider: MuseumProvider {
         }
     }
 
-    // MARK: - SPARQL discovery
+    // MARK: - SPARQL discovery (weighted queries)
 
-    private func fetchRandomObjectUUIDs(limit: Int) async throws -> [String] {
+    /// Fetch traditional art forms: paintings, drawings, watercolors, prints
+    private func fetchTraditionalArtUUIDs(limit: Int) async throws -> [String] {
         let query = """
         PREFIX crm: <http://www.cidoc-crm.org/cidoc-crm/>
-        SELECT ?obj WHERE { ?obj a crm:E22_Human-Made_Object . }
+        PREFIX aat: <http://vocab.getty.edu/aat/>
+        SELECT DISTINCT ?obj WHERE {
+            ?obj a crm:E22_Human-Made_Object ;
+                 crm:P2_has_type ?type .
+            FILTER (
+                ?type = aat:300033618 ||  # painting
+                ?type = aat:300033973 ||  # drawing
+                ?type = aat:300078925 ||  # watercolor
+                ?type = aat:300041273     # print
+            )
+        }
         ORDER BY RAND()
         LIMIT \(limit)
         """
 
+        return try await executeSPARQLQuery(query)
+    }
+
+    /// Fetch photographs separately (with limited quota)
+    private func fetchPhotographUUIDs(limit: Int) async throws -> [String] {
+        let query = """
+        PREFIX crm: <http://www.cidoc-crm.org/cidoc-crm/>
+        PREFIX aat: <http://vocab.getty.edu/aat/>
+        SELECT DISTINCT ?obj WHERE {
+            ?obj a crm:E22_Human-Made_Object ;
+                 crm:P2_has_type ?type .
+            FILTER (
+                ?type = aat:300046300     # photograph
+            )
+        }
+        ORDER BY RAND()
+        LIMIT \(limit)
+        """
+
+        return try await executeSPARQLQuery(query)
+    }
+
+    /// Execute a SPARQL query and return UUIDs
+    private func executeSPARQLQuery(_ query: String) async throws -> [String] {
         var comps = URLComponents(url: sparqlEndpoint, resolvingAgainstBaseURL: false)!
         comps.queryItems = [URLQueryItem(name: "query", value: query)]
         guard let url = comps.url else { throw URLError(.badURL) }
