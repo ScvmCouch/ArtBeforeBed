@@ -175,13 +175,11 @@ class CarouselViewController: UIViewController, UIScrollViewDelegate {
     }
     
     private func setupGestures() {
-        // Single tap - handled by zoom view but we need it for info toggle
-        let singleTap = UITapGestureRecognizer(target: self, action: #selector(handleSingleTap))
-        singleTap.numberOfTapsRequired = 1
-        singleTap.delegate = self
-        view.addGestureRecognizer(singleTap)
-        
-        // Double tap is handled by ZoomableImageView
+        // Single tap is handled by the ZoomableImageView and forwarded to us
+        // This avoids conflicts with the zoom scroll view
+        currentZoomView.onSingleTap = { [weak self] in
+            self?.delegate?.carouselDidTap()
+        }
     }
     
     // MARK: - Layout
@@ -263,12 +261,6 @@ class CarouselViewController: UIViewController, UIScrollViewDelegate {
         // Reset zoom on the current image when we navigate
         currentZoomView.resetZoom()
         updatePagingEnabled()
-    }
-    
-    // MARK: - Gesture Handlers
-    
-    @objc private func handleSingleTap(_ gesture: UITapGestureRecognizer) {
-        delegate?.carouselDidTap()
     }
     
     // MARK: - UIScrollViewDelegate (for paging)
@@ -363,26 +355,6 @@ class CarouselViewController: UIViewController, UIScrollViewDelegate {
     }
 }
 
-// MARK: - UIGestureRecognizerDelegate
-
-extension CarouselViewController: UIGestureRecognizerDelegate {
-    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        return true
-    }
-    
-    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRequireFailureOf otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        // Single tap should wait for double tap to fail
-        if gestureRecognizer is UITapGestureRecognizer && otherGestureRecognizer is UITapGestureRecognizer {
-            let tap = gestureRecognizer as! UITapGestureRecognizer
-            let other = otherGestureRecognizer as! UITapGestureRecognizer
-            if tap.numberOfTapsRequired == 1 && other.numberOfTapsRequired == 2 {
-                return true
-            }
-        }
-        return false
-    }
-}
-
 // MARK: - Zoomable Image View
 
 class ZoomableImageView: UIScrollView, UIScrollViewDelegate {
@@ -390,6 +362,7 @@ class ZoomableImageView: UIScrollView, UIScrollViewDelegate {
     private let imageView = UIImageView()
     
     var onZoomChanged: ((Bool) -> Void)?
+    var onSingleTap: (() -> Void)?
     
     private let maxZoomScale: CGFloat = 5.0
     private let doubleTapZoomScale: CGFloat = 2.5
@@ -415,12 +388,21 @@ class ZoomableImageView: UIScrollView, UIScrollViewDelegate {
         
         imageView.contentMode = .scaleAspectFit
         imageView.backgroundColor = .black
+        imageView.isUserInteractionEnabled = true
         addSubview(imageView)
         
-        // Double tap gesture
+        // Single tap gesture - for info toggle, doesn't affect zoom
+        let singleTap = UITapGestureRecognizer(target: self, action: #selector(handleSingleTap))
+        singleTap.numberOfTapsRequired = 1
+        imageView.addGestureRecognizer(singleTap)
+        
+        // Double tap gesture - for zoom
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
         doubleTap.numberOfTapsRequired = 2
-        addGestureRecognizer(doubleTap)
+        imageView.addGestureRecognizer(doubleTap)
+        
+        // Single tap requires double tap to fail first
+        singleTap.require(toFail: doubleTap)
     }
     
     override func layoutSubviews() {
@@ -473,6 +455,11 @@ class ZoomableImageView: UIScrollView, UIScrollViewDelegate {
     }
     
     // MARK: - Gesture Handlers
+    
+    @objc private func handleSingleTap() {
+        // Just forward to callback - don't affect zoom at all
+        onSingleTap?()
+    }
     
     @objc private func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
         if zoomScale > 1.01 {
