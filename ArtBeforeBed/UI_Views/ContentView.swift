@@ -13,8 +13,8 @@ struct ContentView: View {
             Color.black.ignoresSafeArea()
             
             if vm.isLoading && vm.currentImage == nil {
-                ProgressView()
-                    .tint(.white)
+                // Show splash while loading
+                SplashView()
             } else if vm.currentImage != nil {
                 // UIKit carousel with built-in zoom/pan support
                 CarouselView(
@@ -79,7 +79,9 @@ struct ContentView: View {
     }
     
     private var topBar: some View {
-        HStack(spacing: 14) {
+        HStack {
+            Spacer()
+            
             Button {
                 showFilters = true
             } label: {
@@ -87,37 +89,11 @@ struct ContentView: View {
                     .font(.system(size: 18, weight: .semibold))
             }
             
-            Button {
-                showDebug = true
-            } label: {
-                Image(systemName: "ladybug")
-                    .font(.system(size: 18, weight: .semibold))
-            }
-            
             Spacer()
-            
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    isInfoVisible.toggle()
-                }
-            } label: {
-                Image(systemName: isInfoVisible ? "info.circle.fill" : "info.circle")
-                    .font(.system(size: 18, weight: .semibold))
-            }
-            
-            Button {
-                Task {
-                    _ = await vm.swipeNext()
-                }
-            } label: {
-                Image(systemName: "arrow.right")
-                    .font(.system(size: 18, weight: .semibold))
-            }
-            .disabled(vm.nextImage == nil)
         }
         .padding(.horizontal, 16)
         .padding(.top, 14)
-        .foregroundStyle(.white)
+        .foregroundStyle(Color(red: 0.45, green: 0.25, blue: 0.2))
     }
     
     private func infoPanel(for art: Artwork) -> some View {
@@ -181,61 +157,133 @@ private struct FiltersSheet: View {
     }
     
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("Museum") {
-                    Picker("Museum", selection: $museum) {
-                        ForEach(MuseumSelection.allCases) { m in
-                            Text(m.rawValue).tag(m)
-                        }
+        ZStack {
+            Color.black.ignoresSafeArea()
+            
+            VStack(spacing: 0) {
+                // Header
+                HStack {
+                    Button("Close") {
+                        dismiss()
                     }
-                }
-                
-                Section("Medium") {
-                    Picker("Medium", selection: Binding(
-                        get: { medium ?? "Any" },
-                        set: { medium = ($0 == "Any") ? nil : $0 }
-                    )) {
-                        Text("Any").tag("Any")
-                        ForEach(vm.mediumOptions, id: \.self) { Text($0).tag($0) }
-                    }
-                }
-                
-                Section("Geography") {
-                    Picker("Geography", selection: Binding(
-                        get: { geo ?? "Any" },
-                        set: { geo = ($0 == "Any") ? nil : $0 }
-                    )) {
-                        Text("Any").tag("Any")
-                        ForEach(vm.geoOptions, id: \.self) { Text($0).tag($0) }
-                    }
-                }
-                
-                Section("Period") {
-                    Picker("Period", selection: $period) {
-                        ForEach(PeriodPreset.allCases, id: \.self) { p in
-                            Text(String(describing: p)).tag(p)
-                        }
-                    }
-                }
-                
-                Section {
+                    .foregroundStyle(.white.opacity(0.7))
+                    
+                    Spacer()
+                    
+                    Text("Filters")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                    
+                    Spacer()
+                    
                     Button("Apply") {
                         dismiss()
                         Task {
                             await vm.applyFilters(medium: medium, geo: geo, period: period, museum: museum)
                         }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .foregroundStyle(.white)
+                    .fontWeight(.semibold)
                 }
-            }
-            .navigationTitle("Filters")
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Close") { dismiss() }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                
+                ScrollView {
+                    VStack(spacing: 12) {
+                        filterSection(title: "Museum") {
+                            ForEach(MuseumSelection.allCases) { m in
+                                filterOption(
+                                    label: m.rawValue,
+                                    isSelected: museum == m
+                                ) {
+                                    museum = m
+                                }
+                            }
+                        }
+                        
+                        filterSection(title: "Medium") {
+                            filterOption(label: "Any", isSelected: medium == nil) {
+                                medium = nil
+                            }
+                            ForEach(vm.mediumOptions, id: \.self) { m in
+                                filterOption(
+                                    label: m,
+                                    isSelected: medium == m
+                                ) {
+                                    medium = m
+                                }
+                            }
+                        }
+                        
+                        filterSection(title: "Geography") {
+                            filterOption(label: "Any", isSelected: geo == nil) {
+                                geo = nil
+                            }
+                            ForEach(vm.geoOptions, id: \.self) { g in
+                                filterOption(
+                                    label: g,
+                                    isSelected: geo == g
+                                ) {
+                                    geo = g
+                                }
+                            }
+                        }
+                        
+                        filterSection(title: "Period") {
+                            ForEach(PeriodPreset.allCases, id: \.self) { p in
+                                filterOption(
+                                    label: String(describing: p),
+                                    isSelected: period == p
+                                ) {
+                                    period = p
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 20)
                 }
             }
         }
+        .presentationBackground(.black)
+    }
+    
+    private func filterSection<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.5))
+                .textCase(.uppercase)
+                .padding(.leading, 4)
+            
+            VStack(spacing: 2) {
+                content()
+            }
+            .background(.white.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+    }
+    
+    private func filterOption(label: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack {
+                Text(label)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .font(.subheadline)
+                
+                Spacer()
+                
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .foregroundStyle(.white)
+                        .font(.subheadline.weight(.semibold))
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
