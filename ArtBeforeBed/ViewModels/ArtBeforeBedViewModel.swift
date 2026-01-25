@@ -75,12 +75,23 @@ final class ArtBeforeBedViewModel: ObservableObject {
     private let maxAutoRetries = 1
     private let retryDelayNs: UInt64 = 600_000_000
     
+    // MARK: - Prefetch Queue
+    // Keep a buffer of pre-fetched artworks ready to go
+    private var prefetchedArtworks: [Artwork] = []
+    private let prefetchBufferSize = 3
+    private var isPrefetching = false
+    
+    // Track artworks whose images failed to load - don't reuse them
+    private var failedImageURLs: Set<URL> = []
+    
     // MARK: - Public Methods
     
     func start() async {
         await loadWithRetry { [self] in
             try await self.reloadIDs()
             self.clearHistory()
+            self.prefetchedArtworks.removeAll()
+            
             try await self.loadNextArtworkAndPushToHistory()
             
             // Load the current image before showing
@@ -88,7 +99,9 @@ final class ArtBeforeBedViewModel: ObservableObject {
                 self.currentImage = await ImageCache.shared.loadImage(for: current.imageURL)
             }
             
+            // Start aggressive prefetching in background
             await self.prefetchNeighbors()
+            self.startBackgroundPrefetch()
         }
     }
     
@@ -103,6 +116,8 @@ final class ArtBeforeBedViewModel: ObservableObject {
         currentImage = nil
         nextImage = nil
         prevImage = nil
+        prefetchedArtworks.removeAll()
+        failedImageURLs.removeAll()
         
         await start()
     }
@@ -121,7 +136,6 @@ final class ArtBeforeBedViewModel: ObservableObject {
                 historyIndex += 1
                 current = history[historyIndex]
                 
-                // Use cached next image if available
                 if let current {
                     if let cached = await ImageCache.shared.image(for: current.imageURL) {
                         currentImage = cached
@@ -129,30 +143,44 @@ final class ArtBeforeBedViewModel: ObservableObject {
                         currentImage = await ImageCache.shared.loadImage(for: current.imageURL)
                     }
                 }
-            } else {
-                // Need to load new artwork
-                let consumedNext = nextArt
-                let consumedNextImage = nextImage
-                nextArt = nil
-                nextImage = nil
+            } else if let next = nextArt {
+                // Use the pre-assigned nextArt
+                pushToHistory(next)
+                nextArt = nil  // Clear it so prefetchNeighbors will assign a new one
                 
-                if let prefetched = consumedNext {
-                    pushToHistory(prefetched)
-                    // Use the prefetched image if available
-                    if let img = consumedNextImage {
-                        currentImage = img
-                    } else {
-                        currentImage = await ImageCache.shared.loadImage(for: prefetched.imageURL)
-                    }
+                if let img = nextImage {
+                    currentImage = img
+                    nextImage = nil
                 } else {
-                    try await loadNextArtworkAndPushToHistory()
-                    if let current {
-                        currentImage = await ImageCache.shared.loadImage(for: current.imageURL)
+                    // Try to load the image
+                    let loadedImage = await ImageCache.shared.loadImage(for: next.imageURL)
+                    if let loadedImage {
+                        currentImage = loadedImage
+                    } else {
+                        // Image failed to load - mark it and try to get another artwork
+                        print("🔴 [SWIPE] Image failed to load for \(next.id), skipping...")
+                        failedImageURLs.insert(next.imageURL)
+                        
+                        // Try to load another artwork
+                        await prefetchNeighbors()
+                        if let fallbackNext = nextArt {
+                            pushToHistory(fallbackNext)
+                            nextArt = nil
+                            currentImage = await ImageCache.shared.loadImage(for: fallbackNext.imageURL)
+                        }
                     }
+                }
+            } else {
+                // Fallback: load on demand (shouldn't normally happen)
+                print("🟡 [SWIPE] No nextArt available, loading on-demand")
+                try await loadNextArtworkAndPushToHistory()
+                if let current {
+                    currentImage = await ImageCache.shared.loadImage(for: current.imageURL)
                 }
             }
             
             await prefetchNeighbors()
+            startBackgroundPrefetch()
             return true
         } catch {
             errorMessage = "Failed to load next artwork."
@@ -274,10 +302,24 @@ final class ArtBeforeBedViewModel: ObservableObject {
     }
     
     private func loadNextArtworkAvoidingDuplicates() async throws -> Artwork {
+        // This is called during swipe - nextArt should already be set
+        // Just load fresh from IDs as fallback
+        return try await loadNextArtworkFromIDs()
+    }
+    
+    /// Load a new artwork from the ID pool (not from prefetch buffer)
+    private func loadNextArtworkFromIDs() async throws -> Artwork {
         guard !ids.isEmpty else { throw URLError(.badURL) }
         
         let currentID = current?.id
-        let avoidIDs: Set<String> = Set([currentID].compactMap { $0 })
+        var avoidIDs: Set<String> = Set([currentID].compactMap { $0 })
+        
+        // Also avoid anything already in prefetch buffer or history
+        avoidIDs.formUnion(prefetchedArtworks.map { $0.id })
+        avoidIDs.formUnion(history.map { $0.id })
+        if let next = nextArt {
+            avoidIDs.insert(next.id)
+        }
         
         let currentURL = current?.imageURL.absoluteString
         
@@ -295,6 +337,12 @@ final class ArtBeforeBedViewModel: ObservableObject {
                     continue
                 }
                 
+                // Skip if this image URL has failed before
+                if failedImageURLs.contains(art.imageURL) {
+                    print("🔴 [LOAD] Skipping \(candidateID) - image URL previously failed")
+                    continue
+                }
+                
                 return art
             } catch {
                 continue
@@ -303,6 +351,68 @@ final class ArtBeforeBedViewModel: ObservableObject {
         
         throw URLError(.cannotLoadFromNetwork)
     }
+    
+    // MARK: - Background Prefetch System
+    
+    /// Starts background prefetching of artwork metadata
+    /// This runs independently and keeps a buffer of ready-to-use artworks
+    private func startBackgroundPrefetch() {
+        guard !isPrefetching else { return }
+        
+        Task { [weak self] in
+            await self?.fillPrefetchBuffer()
+        }
+    }
+    
+    private func fillPrefetchBuffer() async {
+        guard !isPrefetching else { return }
+        isPrefetching = true
+        defer { isPrefetching = false }
+        
+        while prefetchedArtworks.count < prefetchBufferSize {
+            guard !ids.isEmpty else { break }
+            
+            // Get IDs to avoid (current, history, already prefetched)
+            var avoidIDs = Set(history.map { $0.id })
+            avoidIDs.formUnion(prefetchedArtworks.map { $0.id })
+            if let currentID = current?.id {
+                avoidIDs.insert(currentID)
+            }
+            
+            // Find a candidate
+            var candidateID: String?
+            for _ in 0..<50 {
+                guard let id = ids.randomElement() else { break }
+                if !avoidIDs.contains(id) && !used.contains(id) {
+                    candidateID = id
+                    break
+                }
+            }
+            
+            guard let id = candidateID else { break }
+            used.insert(id)
+            
+            print("🔄 [PREFETCH] Loading metadata for: \(id)")
+            
+            do {
+                let art = try await repository.loadArtwork(id: id)
+                
+                // Also start prefetching the image immediately
+                Task {
+                    await ImageCache.shared.prefetch([art.imageURL])
+                }
+                
+                prefetchedArtworks.append(art)
+                print("🟢 [PREFETCH] Buffer now has \(prefetchedArtworks.count) artworks ready")
+                
+            } catch {
+                print("🔴 [PREFETCH] Failed to load \(id): \(error)")
+                continue
+            }
+        }
+    }
+    
+    // MARK: - Neighbor Prefetch (for prev/next UI)
     
     private func prefetchNeighbors() async {
         // Set up prev artwork reference
@@ -314,15 +424,39 @@ final class ArtBeforeBedViewModel: ObservableObject {
         
         // Set up next artwork reference
         if canGoForwardInHistory {
-            nextArt = history[historyIndex + 1]
-        } else {
-            do {
-                let candidate = try await loadNextArtworkAvoidingDuplicates()
-                nextArt = candidate
-            } catch {
+            // We're in history - use the history item
+            // Clear any stale nextArt that might have been prefetched before we went back
+            let historyNext = history[historyIndex + 1]
+            if nextArt?.id != historyNext.id {
+                // nextArt is stale (from before we navigated back), clear it
                 nextArt = nil
             }
+            nextArt = historyNext
+        } else if nextArt == nil || history.contains(where: { $0.id == nextArt?.id }) || failedImageURLs.contains(nextArt?.imageURL ?? URL(fileURLWithPath: "")) {
+            // We need a new nextArt - either we don't have one,
+            // or the current one is already in history (would be duplicate),
+            // or its image failed to load
+            nextArt = nil
+            
+            // Remove any artworks with failed images from the buffer
+            prefetchedArtworks.removeAll { failedImageURLs.contains($0.imageURL) }
+            
+            // Use from prefetch buffer if available, otherwise load
+            if !prefetchedArtworks.isEmpty {
+                let prefetched = prefetchedArtworks.removeFirst()
+                nextArt = prefetched
+                print("🟢 [PREFETCH] Assigned from buffer: \(prefetched.id)")
+            } else {
+                do {
+                    print("🟡 [PREFETCH] Buffer empty, loading on-demand...")
+                    let candidate = try await loadNextArtworkFromIDs()
+                    nextArt = candidate
+                } catch {
+                    nextArt = nil
+                }
+            }
         }
+        // else: nextArt is already set and valid, keep it
         
         // Prefetch images using the cache
         var urlsToPrefetch: [URL] = []
@@ -337,11 +471,18 @@ final class ArtBeforeBedViewModel: ObservableObject {
             urlsToPrefetch.append(prevArt.imageURL)
         }
         
-        // Start prefetching
+        // Also prefetch images for anything in the buffer
+        for art in prefetchedArtworks {
+            if !urlsToPrefetch.contains(art.imageURL) {
+                urlsToPrefetch.append(art.imageURL)
+            }
+        }
+        
+        // Start prefetching all images
         await ImageCache.shared.prefetch(urlsToPrefetch)
         
         // Update published images for the carousel
-        // Do this after prefetch starts so images load in parallel
+        // Load next image first (higher priority)
         if let nextArt {
             nextImage = await ImageCache.shared.loadImage(for: nextArt.imageURL)
         } else {

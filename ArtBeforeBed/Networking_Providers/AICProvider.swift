@@ -1,19 +1,26 @@
 import Foundation
 
-/// Art Institute of Chicago (AIC) provider
-/// Public domain enforcement:
-/// - Search filter: query[term][is_public_domain]=true
-/// - Detail check: is_public_domain == true
+/// Art Institute of Chicago provider using their public API
+/// Uses proper search endpoint with artwork type filtering
 final class AICProvider: MuseumProvider {
 
     let providerID: String = "aic"
     let sourceName: String = "Art Institute of Chicago"
 
-    private let base = "https://api.artic.edu/api/v1"
-    private let maxIDsPerLoad = 400
+    private let apiBase = "https://api.artic.edu/api/v1"
+    private let imageBase = "https://www.artic.edu/iiif/2"
 
-    // Courtesy header recommended by AIC: "AIC-User-Agent"
-    private let userAgentValue = "ArtBeforeBed (contact: markobrien)"
+    private let maxIDsPerLoad = 500
+
+    // Shared URL session
+    private let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 30
+        return URLSession(configuration: config)
+    }()
+
+    // MARK: - Fetch Artwork IDs
 
     func fetchArtworkIDs(
         query: String,
@@ -21,164 +28,318 @@ final class AICProvider: MuseumProvider {
         geo: String?,
         period: PeriodPreset
     ) async throws -> [String] {
-
-        let q = buildQueryString(base: query, medium: medium, geo: geo, period: period)
-
-        // 1) Always do a safe first request on page 1 to learn total_pages.
-        let firstURL = try makeSearchURL(q: q, page: 1, limit: 100)
-        let firstResp: AICSearchResponse = try await fetchJSON(url: firstURL)
-
-        let totalPages = max(1, firstResp.pagination?.total_pages ?? 1)
-
-        // Choose a random *valid* start page (cap randomness so we don't go deep)
-        let maxRandomPage = min(totalPages, 25)
-        var page = Int.random(in: 1...maxRandomPage)
-
-        var all: [Int] = []
-        var seenPages = 0
-
-        // We'll keep walking forward from that valid page.
-        // If we hit end, we stop.
-        while all.count < maxIDsPerLoad {
-            let url = try makeSearchURL(q: q, page: page, limit: 100)
-
-            let resp: AICSearchResponse
-            do {
-                resp = try await fetchJSON(url: url)
-            } catch {
-                // If random page somehow fails, fall back to page 1 once.
-                if page != 1 && seenPages == 0 {
-                    page = 1
-                    continue
-                }
-                throw error
+        
+        DebugLogger.logProviderStart("AIC", query: query)
+        
+        print("🟡 [AIC] === FETCH REQUEST ===")
+        print("🟡 [AIC] Using /search endpoint with type filtering")
+        print("🟡 [AIC] Random page selection for maximum variety")
+        
+        // Fetch different artwork types in parallel with EQUAL page counts for even distribution
+        // Each type gets the same number of pages to ensure balanced representation
+        let pagesPerType = 5
+        
+        async let paintingIDs = fetchIDsForType("Painting", pages: pagesPerType)
+        async let printIDs = fetchIDsForType("Print", pages: pagesPerType)
+        async let drawingIDs = fetchIDsForType("Drawing and Watercolor", pages: pagesPerType)
+        async let photographIDs = fetchIDsForType("Photograph", pages: pagesPerType)
+        
+        let results = await [paintingIDs, printIDs, drawingIDs, photographIDs]
+        
+        // If type filtering didn't work, fall back to all public domain
+        let hasResults = results.contains { !$0.isEmpty }
+        guard hasResults else {
+            print("🟡 [AIC] ⚠️ Type filters returned 0 results, using all public domain")
+            let fallbackIDs = await fetchAllPublicDomain(pages: 20)
+            guard !fallbackIDs.isEmpty else {
+                throw URLError(.cannotLoadFromNetwork)
             }
-
-            let ids = resp.data.map { $0.id }
-            if ids.isEmpty { break }
-
-            all.append(contentsOf: ids)
-
-            seenPages += 1
-            page += 1
-
-            // Stop at end
-            if let tp = resp.pagination?.total_pages,
-               let cp = resp.pagination?.current_page,
-               cp >= tp {
-                break
-            }
-
-            // Safety stop to avoid looping too long
-            if seenPages >= 8 { break } // 8 pages * 100 = 800 IDs max gathered before dedupe
+            
+            let finalIDs = Array(fallbackIDs).shuffled().prefix(maxIDsPerLoad).map { "\(providerID):\($0)" }
+            print("🟡 [AIC] Fallback: \(finalIDs.count) IDs")
+            DebugLogger.logProviderSuccess("AIC", idCount: finalIDs.count)
+            return finalIDs
         }
-
-        let unique = Array(Set(all)).shuffled()
-        return unique.prefix(maxIDsPerLoad).map { "\(providerID):\($0)" }
+        
+        print("🟡 [AIC] === TYPE DISTRIBUTION ===")
+        print("🟡 [AIC] Paintings: \(results[0].count)")
+        print("🟡 [AIC] Prints: \(results[1].count)")
+        print("🟡 [AIC] Drawings: \(results[2].count)")
+        print("🟡 [AIC] Photographs: \(results[3].count)")
+        
+        // Build a balanced mix by taking equal amounts from each type
+        // This ensures even representation regardless of collection sizes
+        let targetPerType = maxIDsPerLoad / 4  // 125 each for 500 total
+        
+        var balancedIDs: [Int] = []
+        for (index, typeIDs) in results.enumerated() {
+            let shuffled = typeIDs.shuffled()
+            let selected = Array(shuffled.prefix(targetPerType))
+            balancedIDs.append(contentsOf: selected)
+            
+            let typeNames = ["Paintings", "Prints", "Drawings", "Photographs"]
+            print("🟡 [AIC] Selected \(selected.count) \(typeNames[index])")
+        }
+        
+        // Final shuffle to interleave types
+        let finalIDs = balancedIDs.shuffled().map { "\(providerID):\($0)" }
+        
+        print("🟡 [AIC] Total unique: \(Set(balancedIDs).count)")
+        print("🟡 [AIC] Final selection: \(finalIDs.count) IDs (balanced mix)")
+        
+        if finalIDs.count >= 10 {
+            let sample = finalIDs.prefix(10).map { $0.replacingOccurrences(of: "aic:", with: "") }
+            print("🟡 [AIC] Sample IDs: \(sample.joined(separator: ", "))")
+        }
+        
+        DebugLogger.logProviderSuccess("AIC", idCount: finalIDs.count)
+        
+        return finalIDs
+    }
+    
+    /// Fetch IDs for a specific artwork type using the /search endpoint
+    /// Uses artwork_type_title.keyword for exact text matching per Elasticsearch conventions
+    private func fetchIDsForType(_ artworkType: String, pages: Int) async -> [Int] {
+        print("🟡 [AIC] Fetching type: \(artworkType)")
+        
+        // Build Elasticsearch query for this type
+        // IMPORTANT: Use .keyword suffix for exact text field matching
+        let searchQuery: [String: Any] = [
+            "query": [
+                "bool": [
+                    "must": [
+                        ["term": ["is_public_domain": true]],
+                        ["term": ["artwork_type_title.keyword": artworkType]]
+                    ]
+                ]
+            ]
+        ]
+        
+        guard let queryData = try? JSONSerialization.data(withJSONObject: searchQuery),
+              let queryString = String(data: queryData, encoding: .utf8),
+              let encodedQuery = queryString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
+            print("🟡 [AIC] \(artworkType): failed to encode query")
+            return []
+        }
+        
+        // First, get total count
+        let countURL = "\(apiBase)/artworks/search?limit=1&fields=id&params=\(encodedQuery)"
+        guard let url = URL(string: countURL) else { return [] }
+        
+        let totalCount: Int
+        do {
+            let response: AICSearchResponse = try await fetchJSON(url: url)
+            totalCount = response.pagination.total
+            print("🟡 [AIC] \(artworkType): \(totalCount) total items")
+        } catch {
+            print("🟡 [AIC] \(artworkType): error getting count - \(error)")
+            return []
+        }
+        
+        guard totalCount > 0 else {
+            print("🟡 [AIC] \(artworkType): 0 items, skipping")
+            return []
+        }
+        
+        // Calculate total pages and select random ones
+        // IMPORTANT: AIC API returns server errors for pages > 10 with filtered queries
+        // Limiting to first 10 pages (1000 items) for reliability
+        let itemsPerPage = 100
+        let maxReliablePage = 10  // Pages 11+ return HTTP errors
+        let totalPages = (totalCount + itemsPerPage - 1) / itemsPerPage
+        let accessiblePages = min(totalPages, maxReliablePage)
+        let pagesToFetch = min(pages, accessiblePages)
+        let randomPages = (1...accessiblePages).shuffled().prefix(pagesToFetch)
+        
+        print("🟡 [AIC] \(artworkType): fetching \(pagesToFetch) random pages from \(accessiblePages) accessible (\(totalPages) total)")
+        
+        var allIDs: [Int] = []
+        
+        // Fetch pages in parallel
+        await withTaskGroup(of: [Int].self) { group in
+            for page in randomPages {
+                group.addTask {
+                    await self.fetchPageWithQuery(page: page, query: encodedQuery, type: artworkType)
+                }
+            }
+            
+            for await pageIDs in group {
+                allIDs.append(contentsOf: pageIDs)
+            }
+        }
+        
+        print("🟡 [AIC] \(artworkType): collected \(allIDs.count) IDs")
+        return allIDs
+    }
+    
+    /// Fetch a single page with a specific query
+    private func fetchPageWithQuery(page: Int, query: String, type: String) async -> [Int] {
+        let urlString = "\(apiBase)/artworks/search?page=\(page)&limit=100&fields=id&params=\(query)"
+        guard let url = URL(string: urlString) else {
+            print("🟡 [AIC] \(type) p\(page): ❌ Invalid URL")
+            return []
+        }
+        
+        do {
+            let response: AICSearchResponse = try await fetchJSON(url: url)
+            if !response.data.isEmpty {
+                print("🟡 [AIC] \(type) p\(page): \(response.data.count) items")
+            } else {
+                print("🟡 [AIC] \(type) p\(page): 0 items (empty response)")
+            }
+            return response.data.map { $0.id }
+        } catch {
+            print("🟡 [AIC] \(type) p\(page): ❌ Error - \(error.localizedDescription)")
+            return []
+        }
+    }
+    
+    /// Fallback: fetch all public domain artworks
+    private func fetchAllPublicDomain(pages: Int) async -> [Int] {
+        print("🟡 [AIC] Fetching \(pages) random pages of all public domain")
+        
+        let searchQuery: [String: Any] = [
+            "query": [
+                "term": ["is_public_domain": true]
+            ]
+        ]
+        
+        guard let queryData = try? JSONSerialization.data(withJSONObject: searchQuery),
+              let queryString = String(data: queryData, encoding: .utf8),
+              let encodedQuery = queryString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
+            return []
+        }
+        
+        var allIDs: [Int] = []
+        let randomPages = (1...100).shuffled().prefix(pages)
+        
+        await withTaskGroup(of: [Int].self) { group in
+            for page in randomPages {
+                group.addTask {
+                    await self.fetchPageWithQuery(page: page, query: encodedQuery, type: "all")
+                }
+            }
+            
+            for await pageIDs in group {
+                allIDs.append(contentsOf: pageIDs)
+            }
+        }
+        
+        print("🟡 [AIC] All public domain: collected \(allIDs.count) IDs")
+        return allIDs
     }
 
+    // MARK: - Fetch Single Artwork
+
     func fetchArtwork(id: String) async throws -> Artwork {
-        let raw = id.replacingOccurrences(of: "\(providerID):", with: "")
-        guard let artworkID = Int(raw) else {
+        let numericID = id.replacingOccurrences(of: "\(providerID):", with: "")
+        guard let artworkID = Int(numericID) else { throw URLError(.badURL) }
+
+        let fields = "id,title,artist_display,date_display,medium_display,image_id,artwork_type_title"
+        guard let url = URL(string: "\(apiBase)/artworks/\(artworkID)?fields=\(fields)") else {
             throw URLError(.badURL)
         }
 
-        let fields = [
-            "id",
-            "title",
-            "artist_display",
-            "date_display",
-            "medium_display",
-            "image_id",
-            "is_public_domain"
-        ].joined(separator: ",")
+        let response: AICArtworkResponse = try await fetchJSON(url: url)
+        let artwork = response.data
 
-        guard var comps = URLComponents(string: "\(base)/artworks/\(artworkID)") else {
-            throw URLError(.badURL)
-        }
-        comps.queryItems = [
-            URLQueryItem(name: "fields", value: fields)
-        ]
-        guard let url = comps.url else {
-            throw URLError(.badURL)
-        }
-
-        let resp: AICArtworkResponse = try await fetchJSON(url: url)
-        let a = resp.data
-
-        // Strict enforcement: public domain only
-        guard a.is_public_domain == true else {
-            throw URLError(.cannotDecodeContentData)
-        }
-
-        guard let imageID = a.image_id, !imageID.isEmpty else {
+        // Validate image availability
+        guard let imageID = artwork.image_id, !imageID.isEmpty else {
             throw URLError(.resourceUnavailable)
         }
 
-        // IIIF base from config, with a safe fallback.
-        let iiifBase = resp.config?.iiif_url ?? "https://www.artic.edu/iiif/2"
-        let imageURLString = "\(iiifBase)/\(imageID)/full/843,/0/default.jpg"
-        guard let imageURL = URL(string: imageURLString) else {
-            throw URLError(.badURL)
-        }
+        // Construct IIIF image URL (full quality)
+        let imageURL = URL(string: "\(imageBase)/\(imageID)/full/843,/0/default.jpg")!
 
-        let sourceURL = URL(string: "https://www.artic.edu/artworks/\(artworkID)")
+        let title = artwork.title ?? "Untitled"
+        let artist = artwork.artist_display ?? "Unknown Artist"
+        let date = artwork.date_display
+        let medium = artwork.medium_display
+        let contentType = classifyContentType(artworkType: artwork.artwork_type_title)
+
+        print("🟡 [AIC] ✅ Loaded ID \(artworkID): [\(contentType)] type=\(artwork.artwork_type_title ?? "?"), artist=\(artist)")
 
         return Artwork(
             id: id,
-            title: (a.title ?? "").nilIfEmpty ?? "Untitled",
-            artist: (a.artist_display ?? "").nilIfEmpty ?? "Unknown artist",
-            date: (a.date_display ?? "").nilIfEmpty,
-            medium: (a.medium_display ?? "").nilIfEmpty,
+            title: title,
+            artist: artist,
+            date: date,
+            medium: medium,
             imageURL: imageURL,
             source: sourceName,
-            sourceURL: sourceURL
+            sourceURL: URL(string: "https://www.artic.edu/artworks/\(artworkID)")!
         )
     }
 
-    // MARK: - Helpers
-
-    private func buildQueryString(base: String, medium: String?, geo: String?, period: PeriodPreset) -> String {
-        var parts: [String] = [base]
-        if let medium, !medium.isEmpty { parts.append(medium) }
-        if let geo, !geo.isEmpty { parts.append(geo) }
-        _ = period
-        return parts.joined(separator: " ")
+    /// Classify artwork into content type for tracking
+    private func classifyContentType(artworkType: String?) -> String {
+        guard let type = artworkType?.lowercased() else { return "OTHER" }
+        
+        if type.contains("painting") {
+            return "PAINTING"
+        } else if type.contains("print") {
+            return "PRINT"
+        } else if type.contains("drawing") || type.contains("watercolor") {
+            return "DRAWING"
+        } else if type.contains("photograph") {
+            return "PHOTO"
+        }
+        
+        return "OTHER"
     }
 
-    private func makeSearchURL(q: String, page: Int, limit: Int) throws -> URL {
-        guard var comps = URLComponents(string: "\(base)/artworks/search") else {
-            throw URLError(.badURL)
-        }
-
-        comps.queryItems = [
-            URLQueryItem(name: "q", value: q),
-            URLQueryItem(name: "query[term][is_public_domain]", value: "true"),
-            URLQueryItem(name: "fields", value: "id"),
-            URLQueryItem(name: "page", value: String(max(1, page))),
-            URLQueryItem(name: "limit", value: String(min(limit, 100)))
-        ]
-
-        guard let url = comps.url else {
-            throw URLError(.badURL)
-        }
-        return url
-    }
+    // MARK: - Network Helpers
 
     private func fetchJSON<T: Decodable>(url: URL) async throws -> T {
-        var req = URLRequest(url: url)
-        req.timeoutInterval = 30
-        req.setValue(userAgentValue, forHTTPHeaderField: "AIC-User-Agent")
-
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard let http = response as? HTTPURLResponse else {
+        let (data, response) = try await session.data(from: url)
+        
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
-        guard (200...299).contains(http.statusCode) else {
-            // This will surface as -1011; caller/repository now handles it gracefully.
-            throw URLError(.badServerResponse)
-        }
-
+        
         return try JSONDecoder().decode(T.self, from: data)
     }
+}
+
+// MARK: - API Models
+
+private struct AICSearchResponse: Codable {
+    let data: [AICSearchHit]
+    let pagination: AICPagination
+    let config: AICConfig?
+}
+
+private struct AICSearchHit: Codable {
+    let id: Int
+}
+
+private struct AICPagination: Codable {
+    let total: Int
+    let limit: Int
+    let offset: Int
+    let current_page: Int
+    let total_pages: Int
+    let next_url: String?
+    let prev_url: String?
+}
+
+private struct AICConfig: Codable {
+    let iiif_url: String?
+    let website_url: String?
+}
+
+private struct AICArtworkResponse: Codable {
+    let data: AICArtwork
+    let config: AICConfig?
+}
+
+private struct AICArtwork: Codable {
+    let id: Int
+    let title: String?
+    let artist_display: String?
+    let date_display: String?
+    let medium_display: String?
+    let image_id: String?
+    let is_public_domain: Bool?
+    let artwork_type_title: String?
 }

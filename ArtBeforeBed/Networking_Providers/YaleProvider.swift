@@ -55,11 +55,22 @@ final class YaleProvider: MuseumProvider {
         }
         
         struct Production: Codable {
+            let type: String?
+            let _label: String?
             let carried_out_by: [Agent]?
+            let part: [ProductionPart]?  // Sometimes artist is nested in parts
             let timespan: Timespan?
             
             struct Agent: Codable {
+                let id: String?
+                let type: String?
                 let _label: String?
+            }
+            
+            struct ProductionPart: Codable {
+                let type: String?
+                let _label: String?
+                let carried_out_by: [Agent]?
             }
             
             struct Timespan: Codable {
@@ -110,8 +121,75 @@ final class YaleProvider: MuseumProvider {
         geo: String?,
         period: PeriodPreset
     ) async throws -> [String] {
+        let overallStart = CFAbsoluteTimeGetCurrent()
         
         // Build the search query JSON
+        let queryDict = buildQueryDict(query: query, medium: medium, geo: geo, period: period)
+        
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: queryDict),
+              let jsonString = String(data: jsonData, encoding: .utf8) else {
+            throw URLError(.badURL)
+        }
+        
+        // First, fetch page 1 just to get total count
+        let countStart = CFAbsoluteTimeGetCurrent()
+        let totalCount = try await fetchTotalCount(jsonString: jsonString)
+        let countTime = CFAbsoluteTimeGetCurrent() - countStart
+        print("[\(providerID)] Total count fetch: \(String(format: "%.2f", countTime))s (found \(totalCount) items)")
+        
+        guard totalCount > 0 else {
+            throw URLError(.cannotLoadFromNetwork)
+        }
+        
+        // Calculate pagination for randomization
+        // NOTE: Yale LUX API slows dramatically on higher pages (page 50+ can take 7-13s)
+        // Cap at page 20 for reasonable performance (~2000 items accessible, sub-1s per page)
+        let pageSize = 100
+        let maxUsablePage = min(totalCount / pageSize, 19) // Cap at page 20 for performance
+        
+        // Fetch multiple random pages in parallel for better variety
+        let pagesToFetch = min(5, maxUsablePage + 1) // Fetch up to 5 random pages
+        var randomPages = Set<Int>()
+        
+        while randomPages.count < pagesToFetch {
+            randomPages.insert(Int.random(in: 0...maxUsablePage))
+        }
+        
+        print("[\(providerID)] Fetching pages: \(randomPages.sorted()) (max available: \(maxUsablePage))")
+        
+        // Fetch pages in parallel
+        let pagesStart = CFAbsoluteTimeGetCurrent()
+        let allIDs = try await withThrowingTaskGroup(of: (Int, [String], Double).self) { group in
+            for page in randomPages {
+                group.addTask {
+                    let pageStart = CFAbsoluteTimeGetCurrent()
+                    let ids = try await self.fetchPage(jsonString: jsonString, page: page, pageSize: pageSize)
+                    let pageTime = CFAbsoluteTimeGetCurrent() - pageStart
+                    return (page, ids, pageTime)
+                }
+            }
+            
+            var collected: [String] = []
+            for try await (page, pageIDs, pageTime) in group {
+                print("[\(self.providerID)]   Page \(page): \(pageIDs.count) IDs in \(String(format: "%.2f", pageTime))s")
+                collected.append(contentsOf: pageIDs)
+            }
+            return collected
+        }
+        let pagesTime = CFAbsoluteTimeGetCurrent() - pagesStart
+        
+        // Shuffle the combined results for extra randomization
+        let shuffled = allIDs.shuffled()
+        
+        let overallTime = CFAbsoluteTimeGetCurrent() - overallStart
+        print("[\(providerID)] Complete: \(shuffled.count) IDs in \(String(format: "%.2f", overallTime))s (pages: \(String(format: "%.2f", pagesTime))s parallel)")
+        
+        return Array(shuffled.prefix(500))
+    }
+    
+    // MARK: - Query Building
+    
+    private func buildQueryDict(query: String, medium: String?, geo: String?, period: PeriodPreset) -> [String: Any] {
         var filters: [[String: Any]] = []
         
         // Always require digital images
@@ -149,38 +227,46 @@ final class YaleProvider: MuseumProvider {
             filters.append(["text": periodText])
         }
         
-        // Construct the query JSON
-        let queryDict: [String: Any] = ["AND": filters]
-        
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: queryDict),
-              let jsonString = String(data: jsonData, encoding: .utf8) else {
-            throw URLError(.badURL)
-        }
-        
+        return ["AND": filters]
+    }
+    
+    private func fetchTotalCount(jsonString: String) async throws -> Int {
         var comps = URLComponents(string: searchBase)!
         comps.queryItems = [
             URLQueryItem(name: "q", value: jsonString),
-            URLQueryItem(name: "pageLength", value: "100")
+            URLQueryItem(name: "pageLength", value: "1") // Minimal fetch just for count
         ]
         
         guard let url = comps.url else { throw URLError(.badURL) }
         
         let response: SearchResponse = try await fetchJSON(url: url)
         
-        guard let items = response.orderedItems, !items.isEmpty else {
-            throw URLError(.cannotLoadFromNetwork)
-        }
+        // Total count is in partOf[0].totalItems
+        return response.partOf?.first?.totalItems ?? 0
+    }
+    
+    private func fetchPage(jsonString: String, page: Int, pageSize: Int) async throws -> [String] {
+        var comps = URLComponents(string: searchBase)!
+        comps.queryItems = [
+            URLQueryItem(name: "q", value: jsonString),
+            URLQueryItem(name: "pageLength", value: String(pageSize)),
+            URLQueryItem(name: "page", value: String(page + 1)) // LUX uses 1-based pages
+        ]
+        
+        guard let url = comps.url else { throw URLError(.badURL) }
+        
+        let response: SearchResponse = try await fetchJSON(url: url)
+        
+        guard let items = response.orderedItems else { return [] }
         
         // Extract UUIDs from the data URIs
-        let ids = items.compactMap { item -> String? in
+        return items.compactMap { item -> String? in
             // item.id looks like: "https://lux.collections.yale.edu/data/object/uuid"
             guard let uuid = item.id.split(separator: "/").last.map(String.init) else {
                 return nil
             }
             return "\(providerID):\(uuid)"
         }
-        
-        return Array(ids.prefix(500))
     }
     
     func fetchArtwork(id: String) async throws -> Artwork {
@@ -223,7 +309,7 @@ final class YaleProvider: MuseumProvider {
         return Artwork(
             id: id,
             title: title,
-            artist: artist,
+            artist: artist ?? "",  // Empty string if no artist found
             date: date,
             medium: medium,
             imageURL: imageURL,
@@ -282,13 +368,67 @@ final class YaleProvider: MuseumProvider {
         return nil
     }
     
-    private func extractArtist(from obj: LinkedArtObject) -> String {
-        if let agents = obj.produced_by?.carried_out_by,
-           let firstAgent = agents.first,
-           let name = firstAgent._label {
-            return name
+    private func extractArtist(from obj: LinkedArtObject) -> String? {
+        var allNames: [String] = []
+        
+        // Try produced_by.carried_out_by first (direct attribution)
+        if let agents = obj.produced_by?.carried_out_by {
+            allNames.append(contentsOf: agents.compactMap { $0._label })
         }
-        return "Unknown artist"
+        
+        // Try produced_by.part[].carried_out_by (nested in production parts)
+        if let parts = obj.produced_by?.part {
+            for part in parts {
+                if let agents = part.carried_out_by {
+                    allNames.append(contentsOf: agents.compactMap { $0._label })
+                }
+            }
+        }
+        
+        // Filter out placeholder/unknown values and deduplicate
+        let validNames = allNames
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { name in
+                let lower = name.lowercased()
+                // Filter out unknown/placeholder values
+                if lower.isEmpty ||
+                   lower == "unknown" ||
+                   lower == "unknown artist" ||
+                   lower == "unidentified" ||
+                   lower == "anonymous" ||
+                   lower.hasPrefix("unknown ") ||
+                   lower.hasPrefix("unidentified ") {
+                    return false
+                }
+                return true
+            }
+        
+        // Deduplicate while preserving order
+        var seen = Set<String>()
+        let uniqueNames = validNames.filter { name in
+            let dominated = name.lowercased()
+            if seen.contains(dominated) { return false }
+            seen.insert(dominated)
+            return true
+        }
+        
+        if !uniqueNames.isEmpty {
+            return uniqueNames.joined(separator: "; ")
+        }
+        
+        // Fallback: use produced_by._label if it looks like an artist name
+        if let prodLabel = obj.produced_by?._label {
+            let lower = prodLabel.lowercased()
+            // Skip generic/placeholder labels
+            if !lower.contains("production") &&
+               !lower.contains("unknown") &&
+               !lower.contains("unidentified") {
+                return prodLabel
+            }
+        }
+        
+        // Return nil if no valid artist found - UI will display blank
+        return nil
     }
     
     private func extractDate(from obj: LinkedArtObject) -> String? {

@@ -80,20 +80,24 @@ struct ContentView: View {
     
     private var topBar: some View {
         HStack {
-            Spacer()
-            
             Button {
                 showFilters = true
             } label: {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 18, weight: .semibold))
+                // Three horizontal lines (hamburger menu)
+                VStack(spacing: 5) {
+                    ForEach(0..<3, id: \.self) { _ in
+                        RoundedRectangle(cornerRadius: 1)
+                            .frame(width: 20, height: 2)
+                    }
+                }
+                .padding(10)
             }
             
             Spacer()
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
-        .foregroundStyle(Color(red: 0.45, green: 0.25, blue: 0.2))
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
+        .foregroundStyle(Color(red: 0.35, green: 0.15, blue: 0.12))
     }
     
     private func infoPanel(for art: Artwork) -> some View {
@@ -143,147 +147,213 @@ private struct FiltersSheet: View {
     @ObservedObject var vm: ArtBeforeBedViewModel
     @Environment(\.dismiss) private var dismiss
     
-    @State private var medium: String?
-    @State private var geo: String?
-    @State private var period: PeriodPreset
     @State private var museum: MuseumSelection
+    
+    private let accentColor = Color(red: 0.85, green: 0.75, blue: 0.65)
     
     init(vm: ArtBeforeBedViewModel) {
         self.vm = vm
-        _medium = State(initialValue: vm.selectedMedium)
-        _geo = State(initialValue: vm.selectedGeo)
-        _period = State(initialValue: vm.selectedPeriod)
         _museum = State(initialValue: vm.selectedMuseum)
     }
     
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            // Dark gradient background
+            LinearGradient(
+                colors: [
+                    Color(red: 0.08, green: 0.06, blue: 0.05),
+                    Color(red: 0.05, green: 0.03, blue: 0.02)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
             
             VStack(spacing: 0) {
                 // Header
-                HStack {
-                    Button("Close") {
-                        dismiss()
-                    }
-                    .foregroundStyle(.white.opacity(0.7))
-                    
-                    Spacer()
-                    
-                    Text("Filters")
-                        .font(.headline)
-                        .foregroundStyle(.white)
-                    
-                    Spacer()
-                    
-                    Button("Apply") {
-                        dismiss()
-                        Task {
-                            await vm.applyFilters(medium: medium, geo: geo, period: period, museum: museum)
-                        }
-                    }
-                    .foregroundStyle(.white)
-                    .fontWeight(.semibold)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 14)
+                header
                 
-                ScrollView {
-                    VStack(spacing: 12) {
-                        filterSection(title: "Museum") {
-                            ForEach(MuseumSelection.allCases) { m in
-                                filterOption(
-                                    label: m.rawValue,
-                                    isSelected: museum == m
-                                ) {
+                Spacer()
+                
+                // Content at bottom
+                VStack(spacing: 24) {
+                    filterSection(title: "Collection", icon: "building.columns") {
+                        ForEach(MuseumSelection.allCases) { m in
+                            filterChip(
+                                label: m.rawValue,
+                                isSelected: museum == m
+                            ) {
+                                withAnimation(.easeInOut(duration: 0.15)) {
                                     museum = m
                                 }
                             }
                         }
-                        
-                        filterSection(title: "Medium") {
-                            filterOption(label: "Any", isSelected: medium == nil) {
-                                medium = nil
-                            }
-                            ForEach(vm.mediumOptions, id: \.self) { m in
-                                filterOption(
-                                    label: m,
-                                    isSelected: medium == m
-                                ) {
-                                    medium = m
-                                }
-                            }
-                        }
-                        
-                        filterSection(title: "Geography") {
-                            filterOption(label: "Any", isSelected: geo == nil) {
-                                geo = nil
-                            }
-                            ForEach(vm.geoOptions, id: \.self) { g in
-                                filterOption(
-                                    label: g,
-                                    isSelected: geo == g
-                                ) {
-                                    geo = g
-                                }
-                            }
-                        }
-                        
-                        filterSection(title: "Period") {
-                            ForEach(PeriodPreset.allCases, id: \.self) { p in
-                                filterOption(
-                                    label: String(describing: p),
-                                    isSelected: period == p
-                                ) {
-                                    period = p
-                                }
-                            }
-                        }
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 20)
                 }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 16)
+                
+                // Apply button at bottom
+                applyButton
             }
         }
-        .presentationBackground(.black)
+        .presentationDetents([.fraction(0.4)])
+        .presentationBackground(.clear)
+        .presentationDragIndicator(.visible)
     }
     
-    private func filterSection<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.5))
-                .textCase(.uppercase)
-                .padding(.leading, 4)
+    private var header: some View {
+        HStack {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .frame(width: 32, height: 32)
+                    .background(.white.opacity(0.08))
+                    .clipShape(Circle())
+            }
             
-            VStack(spacing: 2) {
+            Spacer()
+            
+            Text("Filters")
+                .font(.system(size: 18, weight: .semibold, design: .serif))
+                .foregroundStyle(.white.opacity(0.9))
+            
+            Spacer()
+            
+            // Invisible spacer for balance
+            Color.clear
+                .frame(width: 32, height: 32)
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 16)
+        .padding(.bottom, 8)
+    }
+    
+    private var applyButton: some View {
+        VStack(spacing: 0) {
+            LinearGradient(
+                colors: [.clear, Color(red: 0.05, green: 0.03, blue: 0.02)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 20)
+            
+            Button {
+                dismiss()
+                Task {
+                    await vm.applyFilters(
+                        medium: nil,
+                        geo: nil,
+                        period: .any,
+                        museum: museum
+                    )
+                }
+            } label: {
+                Text("Apply Filters")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color(red: 0.1, green: 0.08, blue: 0.06))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 50)
+                    .background(accentColor)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 30)
+            .background(Color(red: 0.05, green: 0.03, blue: 0.02))
+        }
+    }
+    
+    private func filterSection<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 12))
+                    .foregroundStyle(accentColor.opacity(0.8))
+                
+                Text(title.uppercased())
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(1.5)
+                    .foregroundStyle(.white.opacity(0.4))
+            }
+            .padding(.leading, 4)
+            
+            FlowLayout(spacing: 8) {
                 content()
             }
-            .background(.white.opacity(0.08))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
     }
     
-    private func filterOption(label: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+    private func filterChip(label: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack {
-                Text(label)
-                    .foregroundStyle(.white.opacity(0.85))
-                    .font(.subheadline)
-                
-                Spacer()
-                
-                if isSelected {
-                    Image(systemName: "checkmark")
-                        .foregroundStyle(.white)
-                        .font(.subheadline.weight(.semibold))
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .contentShape(Rectangle())
+            Text(label)
+                .font(.system(size: 14, weight: isSelected ? .semibold : .regular))
+                .foregroundStyle(isSelected ? Color(red: 0.1, green: 0.08, blue: 0.06) : .white.opacity(0.7))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(
+                    isSelected
+                        ? accentColor
+                        : Color.white.opacity(0.06)
+                )
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .strokeBorder(
+                            isSelected ? Color.clear : Color.white.opacity(0.1),
+                            lineWidth: 1
+                        )
+                )
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Flow Layout for Chips
+
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+    
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let result = FlowResult(in: proposal.width ?? 0, subviews: subviews, spacing: spacing)
+        return CGSize(width: proposal.width ?? 0, height: result.height)
+    }
+    
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let result = FlowResult(in: bounds.width, subviews: subviews, spacing: spacing)
+        for (index, subview) in subviews.enumerated() {
+            let point = result.positions[index]
+            subview.place(at: CGPoint(x: bounds.minX + point.x, y: bounds.minY + point.y), proposal: .unspecified)
+        }
+    }
+    
+    struct FlowResult {
+        var positions: [CGPoint] = []
+        var height: CGFloat = 0
+        
+        init(in width: CGFloat, subviews: Subviews, spacing: CGFloat) {
+            var x: CGFloat = 0
+            var y: CGFloat = 0
+            var rowHeight: CGFloat = 0
+            
+            for subview in subviews {
+                let size = subview.sizeThatFits(.unspecified)
+                
+                if x + size.width > width && x > 0 {
+                    x = 0
+                    y += rowHeight + spacing
+                    rowHeight = 0
+                }
+                
+                positions.append(CGPoint(x: x, y: y))
+                rowHeight = max(rowHeight, size.height)
+                x += size.width + spacing
+            }
+            
+            height = y + rowHeight
+        }
     }
 }
 
