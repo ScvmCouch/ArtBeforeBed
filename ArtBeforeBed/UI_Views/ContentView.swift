@@ -15,6 +15,7 @@ struct ContentView: View {
             if vm.isLoading && vm.currentImage == nil {
                 // Show splash while loading
                 SplashView()
+                    .accessibilityLabel("Loading artwork")
             } else if vm.currentImage != nil {
                 // UIKit carousel with built-in zoom/pan support
                 CarouselView(
@@ -26,6 +27,10 @@ struct ContentView: View {
                     }
                 )
                 .ignoresSafeArea()
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(vm.current.map { "\($0.title) by \($0.artist)" } ?? "Artwork")
+                .accessibilityHint("Double tap to \(isInfoVisible ? "hide" : "show") artwork details. Swipe left for next artwork, swipe right for previous.")
+                .accessibilityAddTraits(.isImage)
                 
                 // SwiftUI overlays
                 VStack {
@@ -64,6 +69,7 @@ struct ContentView: View {
             Text("Failed to load")
                 .foregroundStyle(.white)
                 .font(.title2.weight(.semibold))
+                .accessibilityAddTraits(.isHeader)
             
             Text(error)
                 .foregroundStyle(.white.opacity(0.8))
@@ -74,8 +80,10 @@ struct ContentView: View {
                 Task { await vm.start() }
             }
             .buttonStyle(.borderedProminent)
+            .accessibilityHint("Attempts to reload artwork")
         }
         .padding()
+        .accessibilityElement(children: .contain)
     }
     
     private var topBar: some View {
@@ -92,6 +100,8 @@ struct ContentView: View {
                 }
                 .padding(10)
             }
+            .accessibilityLabel("Filters")
+            .accessibilityHint("Opens filter options for museum and medium")
             
             Spacer()
         }
@@ -105,6 +115,7 @@ struct ContentView: View {
             Text(art.title)
                 .foregroundStyle(.white)
                 .font(.headline)
+                .accessibilityAddTraits(.isHeader)
             
             Text(art.artist)
                 .foregroundStyle(.white.opacity(0.85))
@@ -118,11 +129,14 @@ struct ContentView: View {
             }
             .foregroundStyle(.white.opacity(0.75))
             .font(.caption)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(art.date.map { "\(art.source), \($0)" } ?? art.source)
             
             if let m = art.medium, !m.isEmpty {
                 Text(m)
                     .foregroundStyle(.white.opacity(0.7))
                     .font(.caption2)
+                    .accessibilityLabel("Medium: \(m)")
             }
             
             Button {
@@ -133,11 +147,15 @@ struct ContentView: View {
             }
             .buttonStyle(.bordered)
             .tint(.white.opacity(0.15))
+            .accessibilityLabel("Share artwork details")
+            .accessibilityHint("Opens sharing and debug options")
         }
         .padding(14)
         .background(.black.opacity(0.6))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .padding(.horizontal, 14)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Artwork information")
     }
 }
 
@@ -148,12 +166,14 @@ private struct FiltersSheet: View {
     @Environment(\.dismiss) private var dismiss
     
     @State private var museum: MuseumSelection
+    @State private var medium: String?
     
     private let accentColor = Color(red: 0.85, green: 0.75, blue: 0.65)
     
     init(vm: ArtBeforeBedViewModel) {
         self.vm = vm
         _museum = State(initialValue: vm.selectedMuseum)
+        _medium = State(initialValue: vm.selectedMedium)
     }
     
     var body: some View {
@@ -176,7 +196,33 @@ private struct FiltersSheet: View {
                 Spacer()
                 
                 // Content at bottom
-                VStack(spacing: 24) {
+                VStack(spacing: 20) {
+                    // Medium filter
+                    filterSection(title: "Medium", icon: "paintbrush") {
+                        // "All" option
+                        filterChip(
+                            label: "All",
+                            isSelected: medium == nil
+                        ) {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                medium = nil
+                            }
+                        }
+                        
+                        // Specific medium options
+                        ForEach(vm.mediumOptions, id: \.self) { m in
+                            filterChip(
+                                label: m,
+                                isSelected: medium == m
+                            ) {
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    medium = m
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Collection filter
                     filterSection(title: "Collection", icon: "building.columns") {
                         ForEach(MuseumSelection.allCases) { m in
                             filterChip(
@@ -197,7 +243,7 @@ private struct FiltersSheet: View {
                 applyButton
             }
         }
-        .presentationDetents([.fraction(0.4)])
+        .presentationDetents([.fraction(0.55)])
         .presentationBackground(.clear)
         .presentationDragIndicator(.visible)
     }
@@ -245,7 +291,7 @@ private struct FiltersSheet: View {
                 dismiss()
                 Task {
                     await vm.applyFilters(
-                        medium: nil,
+                        medium: medium,
                         geo: nil,
                         period: .any,
                         museum: museum
@@ -260,6 +306,7 @@ private struct FiltersSheet: View {
                     .background(accentColor)
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
+            .accessibilityHint("Closes filters and loads new artwork")
             .padding(.horizontal, 20)
             .padding(.bottom, 30)
             .background(Color(red: 0.05, green: 0.03, blue: 0.02))
@@ -279,6 +326,9 @@ private struct FiltersSheet: View {
                     .foregroundStyle(.white.opacity(0.4))
             }
             .padding(.leading, 4)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+            .accessibilityLabel("\(title) options")
             
             FlowLayout(spacing: 8) {
                 content()
@@ -308,6 +358,9 @@ private struct FiltersSheet: View {
                 )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+        .accessibilityHint(isSelected ? "Currently selected" : "Double tap to select")
     }
 }
 

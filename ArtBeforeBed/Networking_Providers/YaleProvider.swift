@@ -351,10 +351,64 @@ final class YaleProvider: MuseumProvider {
     }
     
     private func isOpenAccess(_ obj: LinkedArtObject) -> Bool {
-        // Photography and Prints & Drawings departments at Yale have open access items
-        // Since we're filtering by these departments, assume open access
-        // In the future, could add more sophisticated rights checking if needed
-        return true
+        // Check subject_to for rights classifications
+        if let rights = obj.subject_to {
+            for right in rights {
+                if let classifications = right.classified_as {
+                    for classification in classifications {
+                        let id = classification.id?.lowercased() ?? ""
+                        let label = classification._label?.lowercased() ?? ""
+                        
+                        // Check for public domain or CC0 indicators
+                        if id.contains("publicdomain") ||
+                           id.contains("cc0") ||
+                           id.contains("creativecommons.org/publicdomain") ||
+                           label.contains("public domain") ||
+                           label.contains("cc0") {
+                            return true
+                        }
+                        
+                        // Check for copyright restrictions
+                        if id.contains("copyright") ||
+                           id.contains("in-copyright") ||
+                           label.contains("in copyright") ||
+                           label.contains("rights reserved") {
+                            return false
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Fallback: Check if work is old enough (pre-1926 is safe for US public domain)
+        // Also check for death date > 70 years ago
+        if let timespan = obj.produced_by?.timespan {
+            if let endDate = timespan.end_of_the_end ?? timespan.begin_of_the_begin {
+                if let year = extractYear(from: endDate), year < 1926 {
+                    return true
+                }
+            }
+            // Try parsing from label like "1922–2015" or "1850"
+            if let label = timespan._label, let year = extractYear(from: label) {
+                if year < 1926 {
+                    return true
+                }
+            }
+        }
+        
+        // If we can't determine, reject to be safe
+        return false
+    }
+    
+    private func extractYear(from dateString: String) -> Int? {
+        // Look for 4-digit year pattern
+        let pattern = #"\b(\d{4})\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: dateString, range: NSRange(dateString.startIndex..., in: dateString)),
+              let range = Range(match.range(at: 1), in: dateString) else {
+            return nil
+        }
+        return Int(dateString[range])
     }
     
     private func extractTitle(from obj: LinkedArtObject) -> String? {
@@ -385,23 +439,10 @@ final class YaleProvider: MuseumProvider {
             }
         }
         
-        // Filter out placeholder/unknown values and deduplicate
+        // Clean and filter names
         let validNames = allNames
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { name in
-                let lower = name.lowercased()
-                // Filter out unknown/placeholder values
-                if lower.isEmpty ||
-                   lower == "unknown" ||
-                   lower == "unknown artist" ||
-                   lower == "unidentified" ||
-                   lower == "anonymous" ||
-                   lower.hasPrefix("unknown ") ||
-                   lower.hasPrefix("unidentified ") {
-                    return false
-                }
-                return true
-            }
+            .map { cleanArtistName($0) }
+            .compactMap { $0 }  // Remove nils from cleaning
         
         // Deduplicate while preserving order
         var seen = Set<String>()
@@ -418,17 +459,47 @@ final class YaleProvider: MuseumProvider {
         
         // Fallback: use produced_by._label if it looks like an artist name
         if let prodLabel = obj.produced_by?._label {
-            let lower = prodLabel.lowercased()
-            // Skip generic/placeholder labels
-            if !lower.contains("production") &&
-               !lower.contains("unknown") &&
-               !lower.contains("unidentified") {
-                return prodLabel
+            if let cleaned = cleanArtistName(prodLabel) {
+                return cleaned
             }
         }
         
         // Return nil if no valid artist found - UI will display blank
         return nil
+    }
+    
+    /// Cleans artist name by removing role prefixes and filtering placeholders
+    private func cleanArtistName(_ name: String) -> String? {
+        var cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        // Remove common role prefixes (case insensitive)
+        let prefixes = ["Artist:", "Painter:", "Photographer:", "Printmaker:",
+                        "Draughtsman:", "Engraver:", "Etcher:", "Designer:",
+                        "Attributed to:", "After:", "Circle of:", "School of:",
+                        "Workshop of:", "Follower of:", "Style of:", "Manner of:"]
+        
+        for prefix in prefixes {
+            if cleaned.lowercased().hasPrefix(prefix.lowercased()) {
+                cleaned = String(cleaned.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        
+        let lower = cleaned.lowercased()
+        
+        // Filter out placeholder/unknown values
+        if lower.isEmpty ||
+           lower == "unknown" ||
+           lower == "unknown artist" ||
+           lower == "unidentified" ||
+           lower == "anonymous" ||
+           lower == "anon" ||
+           lower == "anon." ||
+           lower.hasPrefix("unknown ") ||
+           lower.hasPrefix("unidentified ") {
+            return nil
+        }
+        
+        return cleaned
     }
     
     private func extractDate(from obj: LinkedArtObject) -> String? {

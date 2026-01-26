@@ -45,32 +45,49 @@ final class RijksmuseumProvider: MuseumProvider {
         DebugLogger.logProviderStart("Rijksmuseum", query: query)
         
         print("🟠 [RIJKS] === FETCH REQUEST ===")
-        print("🟠 [RIJKS] Using type-based filtering (paintings, prints, drawings)")
-        print("🟠 [RIJKS] Random page selection for variety")
+        print("🟠 [RIJKS] Medium filter: \(medium ?? "all")")
+        print("🟠 [RIJKS] Using type-based filtering")
         
-        // Fetch all types in parallel with weighted distribution
-        async let paintingIDs = fetchIDsForTypeWithRandomPages("painting", pages: 8, maxPage: 20)
-        async let printIDs = fetchIDsForTypeWithRandomPages("print", pages: 6, maxPage: 30)
-        async let drawingIDs = fetchIDsForTypeWithRandomPages("drawing", pages: 6, maxPage: 20)
+        // Map medium filter to Rijksmuseum types
+        let typesToFetch = objectTypesForMedium(medium)
+        print("🟠 [RIJKS] Fetching types: \(typesToFetch)")
         
-        let results = await [paintingIDs, printIDs, drawingIDs]
+        // Note: Rijksmuseum doesn't have a good photographs collection
+        // so we skip that filter silently
+        guard !typesToFetch.isEmpty else {
+            print("🟠 [RIJKS] ⚠️ No matching types for medium filter, returning empty")
+            throw URLError(.cannotLoadFromNetwork)
+        }
+        
+        // Fetch all types in parallel
+        var results: [(String, [String])] = []
+        
+        await withTaskGroup(of: (String, [String]).self) { group in
+            for objType in typesToFetch {
+                group.addTask {
+                    let ids = await self.fetchIDsForTypeWithRandomPages(objType, pages: 8, maxPage: 20)
+                    return (objType, ids)
+                }
+            }
+            
+            for await (objType, ids) in group {
+                print("🟠 [RIJKS] \(objType): \(ids.count) IDs")
+                results.append((objType, ids))
+            }
+        }
         
         // Combine and deduplicate
         var allIDs = Set<String>()
-        for result in results {
-            allIDs.formUnion(result)
+        for (_, ids) in results {
+            allIDs.formUnion(ids)
         }
         
         // If we got nothing, try fallback to first few pages sequentially
         if allIDs.isEmpty {
             print("🟠 [RIJKS] ⚠️ Random pages failed, trying fallback to pages 0-5...")
-            async let fallbackPaintings = fetchSequentialPages("painting", startPage: 0, count: 3)
-            async let fallbackPrints = fetchSequentialPages("print", startPage: 0, count: 2)
-            async let fallbackDrawings = fetchSequentialPages("drawing", startPage: 0, count: 2)
-            
-            let fallbackResults = await [fallbackPaintings, fallbackPrints, fallbackDrawings]
-            for result in fallbackResults {
-                allIDs.formUnion(result)
+            for objType in typesToFetch {
+                let fallbackIDs = await fetchSequentialPages(objType, startPage: 0, count: 3)
+                allIDs.formUnion(fallbackIDs)
             }
         }
         
@@ -80,9 +97,10 @@ final class RijksmuseumProvider: MuseumProvider {
         }
         
         print("🟠 [RIJKS] === TYPE DISTRIBUTION ===")
-        print("🟠 [RIJKS] Paintings: \(results[0].count) (~\(allIDs.isEmpty ? 0 : Int(Double(results[0].count)/Double(allIDs.count)*100))%)")
-        print("🟠 [RIJKS] Prints: \(results[1].count) (~\(allIDs.isEmpty ? 0 : Int(Double(results[1].count)/Double(allIDs.count)*100))%)")
-        print("🟠 [RIJKS] Drawings: \(results[2].count) (~\(allIDs.isEmpty ? 0 : Int(Double(results[2].count)/Double(allIDs.count)*100))%)")
+        for (objType, ids) in results {
+            let percentage = allIDs.isEmpty ? 0 : Int(Double(ids.count) / Double(allIDs.count) * 100)
+            print("🟠 [RIJKS] \(objType): \(ids.count) (~\(percentage)%)")
+        }
         print("🟠 [RIJKS] Total: \(allIDs.count)")
         
         let finalIDs = Array(allIDs).shuffled().prefix(maxIDsPerLoad).map { "\(providerID):\($0)" }
@@ -96,6 +114,29 @@ final class RijksmuseumProvider: MuseumProvider {
         DebugLogger.logProviderSuccess("Rijksmuseum", idCount: finalIDs.count)
         
         return finalIDs
+    }
+    
+    /// Maps user-facing medium filter to Rijksmuseum type parameter values
+    /// Note: Rijksmuseum doesn't have a strong photographs collection
+    private func objectTypesForMedium(_ medium: String?) -> [String] {
+        guard let medium = medium?.lowercased() else {
+            // No filter = all types (no photographs - Rijks doesn't have many)
+            return ["painting", "print", "drawing"]
+        }
+        
+        switch medium {
+        case "paintings":
+            return ["painting"]
+        case "drawings":
+            return ["drawing"]
+        case "prints":
+            return ["print"]
+        case "photographs":
+            // Rijksmuseum has very few photographs - return empty to skip this provider
+            return []
+        default:
+            return ["painting", "print", "drawing"]
+        }
     }
     
     /// Fallback: fetch first few pages sequentially

@@ -132,16 +132,17 @@ final class CMAProvider: MuseumProvider {
         return resp.data.map { $0.id }
     }
     
-    /// Build list of ALL collections to query based on filters
-    /// By default (medium=nil), returns paintings + drawings + prints
+    /// Build list of collections based on medium filter
+    /// Maps user-facing medium names to CMA collection codes
     private func buildAllCollections(medium: String?, geo: String?) -> [String] {
-        var collections: [String] = []
-        
         let mediumLower = (medium ?? "").lowercased()
         
-        // If user selected specific medium, only get that type
-        if mediumLower.contains("drawing") {
-            // Drawings only
+        // Handle specific medium filters
+        if mediumLower == "paintings" {
+            return buildPaintingCollections(geo: geo)
+        }
+        
+        if mediumLower == "drawings" {
             return [
                 "DR - American 19th Century",
                 "DR - American 20th Century",
@@ -152,8 +153,7 @@ final class CMAProvider: MuseumProvider {
             ]
         }
         
-        if mediumLower.contains("print") {
-            // Prints only
+        if mediumLower == "prints" {
             return [
                 "Prints",
                 "PR - Etching",
@@ -162,148 +162,64 @@ final class CMAProvider: MuseumProvider {
             ]
         }
         
-        if mediumLower.contains("photograph") {
-            // Photographs only
+        if mediumLower == "photographs" {
             return ["Photography"]
         }
         
-        // Default: Get paintings + drawings + prints (everything!)
+        // No filter = all types
+        var collections = buildPaintingCollections(geo: geo)
         
-        // PAINTINGS - American and European only
-        if medium == nil || mediumLower.contains("painting") {
-            // American paintings
-            collections.append("American - Painting")
-            
-            // European paintings
-            collections.append("P - Italian 14th-15th Century")
-            collections.append("P - Italian 16th & 17th Century")
-            collections.append("P - Northern European 15th & 16th Century")
-            collections.append("P - Dutch & Flemish 17th Century")
-            collections.append("P - French & Spanish 17th & 18th Century")
-            collections.append("P - British 18th & 19th Century")
-            collections.append("Mod Euro - Painting 1800-1960")
-            
-            // If specific geography requested, filter paintings further
-            if let geo = geo?.lowercased() {
-                if geo.contains("united states") || geo.contains("america") {
-                    collections = ["American - Painting"]
-                } else if geo.contains("france") || geo.contains("spain") {
-                    collections = ["P - French & Spanish 17th & 18th Century", "Mod Euro - Painting 1800-1960"]
-                } else if geo.contains("italy") {
-                    collections = ["P - Italian 14th-15th Century", "P - Italian 16th & 17th Century"]
-                } else if geo.contains("netherlands") || geo.contains("flemish") {
-                    collections = ["P - Dutch & Flemish 17th Century"]
-                } else if geo.contains("england") || geo.contains("british") {
-                    collections = ["P - British 18th & 19th Century"]
-                }
-            }
-        }
+        // Add drawings
+        collections.append(contentsOf: [
+            "DR - American 19th Century",
+            "DR - American 20th Century",
+            "DR - French",
+            "DR - Italian",
+            "DR - German",
+            "Drawings"
+        ])
         
-        // Add drawings and prints when medium is "Any" (not when user specifically selected "Paintings")
-        if medium == nil {
-            // DRAWINGS - Worldwide
-            collections.append("DR - American 19th Century")
-            collections.append("DR - American 20th Century")
-            collections.append("DR - French")
-            collections.append("DR - Italian")
-            collections.append("DR - German")
-            collections.append("Drawings")
-            
-            // PRINTS - Worldwide
-            collections.append("Prints")
-            collections.append("PR - Etching")
-            collections.append("PR - Lithograph")
-            collections.append("PR - Woodcut")
-        }
+        // Add prints
+        collections.append(contentsOf: [
+            "Prints",
+            "PR - Etching",
+            "PR - Lithograph",
+            "PR - Woodcut"
+        ])
         
         return collections
     }
     
-    // MARK: - Collection Filtering
-    
-    /// Returns allowed collection values based on medium and geography
-    /// Paintings: American and European only
-    /// Drawings/Prints: Worldwide
-    private func buildCollectionFilter(medium: String?, geo: String?) -> [String]? {
-        // If no medium specified, return default mix of paintings
-        guard let medium = medium else {
-            return [
-                "American - Painting",
-                "Mod Euro - Painting 1800-1960",
-                "P - Dutch & Flemish 17th Century",
-                "P - Italian 16th & 17th Century"
-            ]
-        }
-        
-        let mediumLower = medium.lowercased()
-        
-        // PAINTINGS - American and European only
-        if mediumLower.contains("painting") {
-            var paintingCollections: [String] = []
-            
-            // American paintings
-            paintingCollections.append("American - Painting")
-            
-            // European paintings
-            paintingCollections.append("P - Italian 14th-15th Century")
-            paintingCollections.append("P - Italian 16th & 17th Century")
-            paintingCollections.append("P - Northern European 15th & 16th Century")
-            paintingCollections.append("P - Dutch & Flemish 17th Century")
-            paintingCollections.append("P - French & Spanish 17th & 18th Century")
-            paintingCollections.append("P - British 18th & 19th Century")
-            paintingCollections.append("Mod Euro - Painting 1800-1960")
-            
-            // If specific geography is requested, filter further
-            if let geo = geo?.lowercased() {
-                if geo.contains("united states") || geo.contains("america") {
-                    return ["American - Painting"]
-                } else if geo.contains("france") || geo.contains("spain") {
-                    return ["P - French & Spanish 17th & 18th Century", "Mod Euro - Painting 1800-1960"]
-                } else if geo.contains("italy") {
-                    return ["P - Italian 14th-15th Century", "P - Italian 16th & 17th Century"]
-                } else if geo.contains("netherlands") || geo.contains("flemish") {
-                    return ["P - Dutch & Flemish 17th Century"]
-                } else if geo.contains("england") || geo.contains("british") {
-                    return ["P - British 18th & 19th Century"]
-                }
+    /// Build painting collections, optionally filtered by geography
+    private func buildPaintingCollections(geo: String?) -> [String] {
+        // Check for geography filter
+        if let geo = geo?.lowercased() {
+            if geo.contains("united states") || geo.contains("america") {
+                return ["American - Painting"]
+            } else if geo.contains("france") || geo.contains("spain") {
+                return ["P - French & Spanish 17th & 18th Century", "Mod Euro - Painting 1800-1960"]
+            } else if geo.contains("italy") {
+                return ["P - Italian 14th-15th Century", "P - Italian 16th & 17th Century"]
+            } else if geo.contains("netherlands") || geo.contains("flemish") {
+                return ["P - Dutch & Flemish 17th Century"]
+            } else if geo.contains("england") || geo.contains("british") {
+                return ["P - British 18th & 19th Century"]
             }
-            
-            return paintingCollections
         }
         
-        // DRAWINGS - Worldwide
-        if mediumLower.contains("drawing") {
-            return [
-                "DR - American 19th Century",
-                "DR - American 20th Century",
-                "DR - French",
-                "DR - Italian",
-                "DR - German",
-                "Drawings"
-            ]
-        }
-        
-        // PRINTS - Worldwide
-        if mediumLower.contains("print") {
-            return [
-                "Prints",
-                "PR - Etching",
-                "PR - Lithograph",
-                "PR - Woodcut"
-            ]
-        }
-        
-        // PHOTOGRAPHS - Worldwide
-        if mediumLower.contains("photograph") {
-            return ["Photography"]
-        }
-        
-        // If medium doesn't match any category, return default paintings
+        // All painting collections
         return [
             "American - Painting",
+            "P - Italian 14th-15th Century",
+            "P - Italian 16th & 17th Century",
+            "P - Northern European 15th & 16th Century",
+            "P - Dutch & Flemish 17th Century",
+            "P - French & Spanish 17th & 18th Century",
+            "P - British 18th & 19th Century",
             "Mod Euro - Painting 1800-1960"
         ]
     }
+    
 
     func fetchArtwork(id: String) async throws -> Artwork {
         DebugLogger.logArtworkFetch(id: id)

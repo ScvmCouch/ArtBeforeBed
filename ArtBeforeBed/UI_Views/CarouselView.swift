@@ -56,7 +56,8 @@ struct CarouselView: UIViewControllerRepresentable {
         }
         
         func carouselCanSwipeNext() -> Bool {
-            parent.vm.nextImage != nil
+            // Allow swipe if we have either the image ready OR the artwork ready to load
+            parent.vm.nextImage != nil || parent.vm.hasNextArtwork
         }
         
         func carouselGetCurrentImage() -> UIImage? {

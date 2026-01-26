@@ -9,6 +9,10 @@ final class ArtBeforeBedViewModel: ObservableObject {
     
     @Published var current: Artwork?
     @Published var nextArt: Artwork?
+    
+    /// Whether there's a next artwork ready (even if image isn't loaded yet)
+    var hasNextArtwork: Bool { nextArt != nil }
+    
     @Published var prevArt: Artwork?
     
     @Published var isLoading: Bool = false
@@ -26,16 +30,13 @@ final class ArtBeforeBedViewModel: ObservableObject {
     @Published var selectedPeriod: PeriodPreset = .any
     @Published var selectedMuseum: MuseumSelection = .mixed
     
+    /// Medium types supported across all museum providers
+    /// Each provider maps these to their specific filtering mechanism
     let mediumOptions: [String] = [
         "Paintings",
-        "Photographs",
-        "Prints",
         "Drawings",
-        "Sculpture",
-        "Ceramics",
-        "Textiles",
-        "Furniture",
-        "Arms and Armor"
+        "Prints",
+        "Photographs"
     ]
     
     let geoOptions: [String] = [

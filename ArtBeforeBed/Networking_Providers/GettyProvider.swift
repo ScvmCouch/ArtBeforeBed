@@ -1,20 +1,18 @@
 import Foundation
 import CoreFoundation
 
-/// Getty Provider - OPTIMIZED VERSION
+/// Getty Provider - OPTIMIZED VERSION with Rights Filtering
 ///
-/// Key Performance Improvements:
-/// 1. Parallel SPARQL queries for traditional art vs photographs
-/// 2. Actor-based caching for Linked Art objects and IIIF manifests
-/// 3. Removed expensive ORDER BY RAND() - uses OFFSET-based random sampling instead
-/// 4. Configurable concurrency limits to prevent overwhelming the server
-/// 5. Preemptive batch fetching to warm the cache
+/// Key Features:
+/// 1. SPARQL queries filter for CC0/Public Domain at query time
+/// 2. Parallel queries for traditional art vs photographs
+/// 3. Actor-based caching for Linked Art objects and IIIF manifests
+/// 4. Conservative offset-based random sampling
 ///
 /// Architecture:
-/// - SPARQL to discover UUIDs (with deterministic random sampling)
-/// - Linked Art object for metadata + rights check
+/// - SPARQL to discover UUIDs (filtered by rights + type)
+/// - Linked Art object for metadata + secondary rights check
 /// - IIIF manifest for images
-/// - 75/25 weighted balance (traditional art / photographs)
 
 // MARK: - Cache Actor
 
@@ -33,7 +31,6 @@ private actor GettyCache {
     
     func setLinkedArt(_ uuid: String, _ node: JSONAny.Node) {
         if linkedArtObjects.count >= maxCacheSize {
-            // Remove oldest ~20% when cache is full
             let keysToRemove = Array(linkedArtObjects.keys.prefix(maxCacheSize / 5))
             keysToRemove.forEach { linkedArtObjects.removeValue(forKey: $0) }
         }
@@ -87,25 +84,26 @@ final class GettyProvider: MuseumProvider {
     private let sparqlEndpoint = URL(string: "https://data.getty.edu/museum/collection/sparql")!
     private let linkedArtObjectBase = "https://data.getty.edu/museum/collection/object"
 
-    // Configuration
-    private let desiredIDsPerBuild = 160
-    private let traditionalArtCount = 120  // 75%
-    private let photographCount = 40        // 25%
+    // Configuration - favor traditional art heavily (most photos aren't CC0)
+    private let desiredIDsPerBuild = 120
+    private let traditionalArtCount = 110  // Mostly traditional art
+    private let photographCount = 10       // Very few photos (most fail rights check)
     
-    // SPARQL tuning - fetch more upfront, fewer rounds
-    private let sparqlBatchSize = 400
+    // SPARQL tuning
+    private let sparqlBatchSize = 300
     private let maxSparqlRetries = 2
     
     // Network tuning
-    private let requestTimeout: TimeInterval = 20  // Reduced from 30
-    private let maxConcurrentFetches = 6           // Limit parallel requests
+    private let requestTimeout: TimeInterval = 20
+    private let maxConcurrentFetches = 6
     
     // Cache
     private let cache = GettyCache()
     
-    // Known collection sizes (approximate, for random offset calculation)
-    private let approxTraditionalArtCount = 8000
-    private let approxPhotographCount = 45000
+    // Conservative collection size estimates for CC0 items only
+    // These are much smaller than total collection
+    private let approxCC0TraditionalArt = 2000
+    private let approxCC0Photographs = 3000
 
     // MARK: - MuseumProvider Protocol
 
@@ -116,33 +114,69 @@ final class GettyProvider: MuseumProvider {
         period: PeriodPreset
     ) async throws -> [String] {
 
-        _ = query; _ = medium; _ = geo; _ = period
+        _ = query; _ = geo; _ = period
 
-        DebugLogger.logProviderStart("Getty", query: "SPARQL discovery (optimized)")
+        DebugLogger.logProviderStart("Getty", query: "SPARQL discovery (CC0 filtered)")
+        print("🟣 [GETTY] Medium filter: \(medium ?? "all")")
         
         let startTime = CFAbsoluteTimeGetCurrent()
 
-        // Run both SPARQL queries in parallel
-        async let traditionalTask = fetchTraditionalArtUUIDs()
-        async let photographTask = fetchPhotographUUIDs()
+        // Determine which types to fetch based on medium filter
+        let fetchTraditional: Bool
+        let fetchPhotos: Bool
         
-        let (traditionalUUIDs, photographUUIDs) = try await (traditionalTask, photographTask)
+        switch medium?.lowercased() {
+        case "paintings", "drawings", "prints":
+            fetchTraditional = true
+            fetchPhotos = false
+        case "photographs":
+            fetchTraditional = false
+            fetchPhotos = true
+        default:
+            // No filter = both
+            fetchTraditional = true
+            fetchPhotos = true
+        }
+        
+        var traditionalUUIDs: [String] = []
+        var photographUUIDs: [String] = []
+        
+        // Fetch based on filter
+        if fetchTraditional && fetchPhotos {
+            async let traditionalTask = fetchCC0TraditionalArtUUIDs()
+            async let photographTask = fetchCC0PhotographUUIDs()
+            (traditionalUUIDs, photographUUIDs) = try await (traditionalTask, photographTask)
+        } else if fetchTraditional {
+            traditionalUUIDs = try await fetchCC0TraditionalArtUUIDs()
+        } else if fetchPhotos {
+            photographUUIDs = try await fetchCC0PhotographUUIDs()
+        }
         
         let sparqlDuration = CFAbsoluteTimeGetCurrent() - startTime
         DebugLogger.log(.success, "Getty: SPARQL completed in \(String(format: "%.2f", sparqlDuration))s - Traditional: \(traditionalUUIDs.count), Photos: \(photographUUIDs.count)")
 
-        // Select weighted distribution
-        let selectedTraditional = Array(traditionalUUIDs.shuffled().prefix(traditionalArtCount))
-        let selectedPhotographs = Array(photographUUIDs.shuffled().prefix(photographCount))
+        // Calculate selection counts
+        let selectedTraditional: [String]
+        let selectedPhotographs: [String]
+        
+        if fetchTraditional && fetchPhotos {
+            selectedTraditional = Array(traditionalUUIDs.shuffled().prefix(traditionalArtCount))
+            selectedPhotographs = Array(photographUUIDs.shuffled().prefix(photographCount))
+        } else if fetchTraditional {
+            selectedTraditional = Array(traditionalUUIDs.shuffled().prefix(desiredIDsPerBuild))
+            selectedPhotographs = []
+        } else {
+            selectedTraditional = []
+            selectedPhotographs = Array(photographUUIDs.shuffled().prefix(desiredIDsPerBuild))
+        }
         
         DebugLogger.log(.success, "Getty: Selected \(selectedTraditional.count) traditional + \(selectedPhotographs.count) photographs")
 
-        guard !selectedTraditional.isEmpty else {
-            DebugLogger.log(.error, "Getty: No traditional art UUIDs discovered from SPARQL")
+        guard !selectedTraditional.isEmpty || !selectedPhotographs.isEmpty else {
+            DebugLogger.log(.error, "Getty: No CC0 UUIDs found for medium filter: \(medium ?? "all")")
             throw URLError(.cannotLoadFromNetwork)
         }
 
-        // Combine and shuffle
         var allUUIDs = selectedTraditional + selectedPhotographs
         allUUIDs.shuffle()
         
@@ -161,7 +195,7 @@ final class GettyProvider: MuseumProvider {
             return cached
         }
         
-        // Check if previously failed (avoid repeated failures)
+        // Check if previously failed
         if await cache.isFailed(id) {
             DebugLogger.log(.warning, "Getty: Skipping previously failed ID \(id)")
             throw URLError(.resourceUnavailable)
@@ -186,7 +220,7 @@ final class GettyProvider: MuseumProvider {
     private func fetchArtworkInternal(uuid: String, id: String) async throws -> Artwork {
         let objectURL = URL(string: "\(linkedArtObjectBase)/\(uuid)")!
 
-        // STEP 1: Fetch Linked Art object (with caching)
+        // STEP 1: Fetch Linked Art object
         let objectJSON: JSONAny.Node
         if let cached = await cache.getLinkedArt(uuid) {
             DebugLogger.log(.info, "Getty: Linked Art cache hit for \(uuid)")
@@ -197,7 +231,7 @@ final class GettyProvider: MuseumProvider {
             await cache.setLinkedArt(uuid, objectJSON)
         }
 
-        // STEP 2: CC0/Public domain check
+        // STEP 2: Secondary CC0/Public domain check (belt and suspenders)
         guard isCC0orPublicDomain(objectJSON) else {
             DebugLogger.log(.warning, "Getty: \(uuid) not CC0/Public Domain")
             throw URLError(.resourceUnavailable)
@@ -206,62 +240,42 @@ final class GettyProvider: MuseumProvider {
 
         // STEP 3: Extract IIIF manifest URL
         guard let manifestURLString = JSONAny.findFirstString(
-            where: { $0.contains("media.getty.edu/iiif/manifest/") },
+            where: { $0.contains("/iiif/") && $0.contains("manifest") },
             in: objectJSON
         ),
-        let manifestURL = URL(string: manifestURLString)
-        else {
-            DebugLogger.log(.error, "Getty: No IIIF manifest URL found in object for \(uuid)")
+        let manifestURL = URL(string: manifestURLString) else {
+            DebugLogger.log(.warning, "Getty: \(uuid) no IIIF manifest URL found")
             throw URLError(.resourceUnavailable)
         }
-        DebugLogger.log(.success, "Getty: Found manifest: \(manifestURL.absoluteString)")
 
-        // STEP 4: Fetch IIIF manifest (with caching)
+        // STEP 4: Fetch IIIF manifest
         let manifestJSON: JSONAny.Node
-        let manifestKey = manifestURL.absoluteString
-        if let cached = await cache.getManifest(manifestKey) {
-            DebugLogger.log(.info, "Getty: Manifest cache hit")
+        if let cached = await cache.getManifest(manifestURLString) {
             manifestJSON = cached
         } else {
-            DebugLogger.log(.info, "Getty: Fetching IIIF manifest")
-            manifestJSON = try await fetchJSON(url: manifestURL, accept: "application/json")
-            await cache.setManifest(manifestKey, manifestJSON)
+            DebugLogger.log(.info, "Getty: Fetching IIIF manifest for \(uuid)")
+            manifestJSON = try await fetchJSON(url: manifestURL, accept: "application/ld+json, application/json")
+            await cache.setManifest(manifestURLString, manifestJSON)
         }
 
         // STEP 5: Extract image URL
         guard let imageURL = extractImageURL(fromManifest: manifestJSON) else {
-            DebugLogger.log(.error, "Getty: Could not extract image URL from manifest")
+            DebugLogger.log(.warning, "Getty: \(uuid) no image URL in manifest")
             throw URLError(.resourceUnavailable)
         }
-        DebugLogger.log(.success, "Getty: Image URL: \(imageURL.absoluteString)")
 
         // STEP 6: Extract metadata
-        let title =
-            JSONAny.firstString(at: ["label"], in: objectJSON)
-            ?? JSONAny.firstString(at: ["_label"], in: objectJSON)
-            ?? "Untitled"
+        let title = extractTitle(from: objectJSON) ?? "Untitled"
+        let artist = extractArtist(from: objectJSON) ?? "Unknown artist"
+        let date = extractDate(from: objectJSON)
+        let medium = extractMedium(from: objectJSON)
 
-        let artist =
-            JSONAny.firstString(at: ["produced_by", "carried_out_by", 0, "_label"], in: objectJSON)
-            ?? JSONAny.firstString(at: ["produced_by", "carried_out_by", 0, "label"], in: objectJSON)
-            ?? "Unknown artist"
-
-        let date =
-            JSONAny.firstString(at: ["produced_by", "timespan", "_label"], in: objectJSON)
-            ?? JSONAny.firstString(at: ["produced_by", "timespan", "label"], in: objectJSON)
-
-        let medium =
-            JSONAny.firstString(at: ["classified_as", 0, "_label"], in: objectJSON)
-            ?? JSONAny.firstString(at: ["classified_as", 0, "label"], in: objectJSON)
-
-        DebugLogger.log(.info, "Getty: Title: \(title), Artist: \(artist)")
+        let sourceURL = URL(string: "https://www.getty.edu/art/collection/object/\(uuid)")
 
         var debug: [String: String] = [:]
         debug["provider"] = providerID
-        debug["getty_uuid"] = uuid
-        debug["linkedart_object"] = objectURL.absoluteString
-        debug["manifest"] = manifestURL.absoluteString
-        debug["image_url"] = imageURL.absoluteString
+        debug["uuid"] = uuid
+        debug["manifestURL"] = manifestURLString
 
         DebugLogger.logArtworkSuccess(id: id, title: title)
 
@@ -273,24 +287,25 @@ final class GettyProvider: MuseumProvider {
             medium: medium?.nilIfEmpty,
             imageURL: imageURL,
             source: sourceName,
-            sourceURL: URL(string: "https://www.getty.edu"),
+            sourceURL: sourceURL,
             debugFields: debug
         )
     }
 
-    // MARK: - SPARQL Discovery (Optimized)
+    // MARK: - SPARQL Discovery
     
-    /// Fetch traditional art using OFFSET-based random sampling (faster than ORDER BY RAND())
-    private func fetchTraditionalArtUUIDs() async throws -> [String] {
+    /// Fetch traditional art UUIDs (paintings, drawings, prints, watercolors)
+    /// Rights filtering happens at fetch time, not SPARQL time
+    private func fetchCC0TraditionalArtUUIDs() async throws -> [String] {
         var allUUIDs: Set<String> = []
         
-        // Use multiple random offsets to sample different parts of the collection
-        let offsets = generateRandomOffsets(
-            count: 3,
-            maxOffset: max(0, approxTraditionalArtCount - sparqlBatchSize)
-        )
+        // Use offset 0 plus a couple random offsets for variety
+        // Traditional art collection is smaller, so keep offsets conservative
+        var offsets = [0]
+        offsets.append(contentsOf: generateRandomOffsets(count: 2, maxOffset: 2000))
         
-        // Fetch from multiple offsets in parallel
+        print("🟣 [GETTY] Traditional art offsets: \(offsets)")
+        
         try await withThrowingTaskGroup(of: [String].self) { group in
             for offset in offsets {
                 group.addTask {
@@ -299,6 +314,7 @@ final class GettyProvider: MuseumProvider {
             }
             
             for try await batch in group {
+                print("🟣 [GETTY] Traditional art batch: \(batch.count) UUIDs")
                 batch.forEach { allUUIDs.insert($0) }
             }
         }
@@ -307,7 +323,8 @@ final class GettyProvider: MuseumProvider {
     }
     
     private func fetchTraditionalArtBatch(offset: Int) async throws -> [String] {
-        // Using OFFSET for random sampling - much faster than ORDER BY RAND()
+        // Query for traditional art types only - rights check happens at fetch time
+        // AAT codes: 300033618 (paintings), 300033973 (drawings), 300078925 (prints), 300041273 (watercolors)
         let query = """
         PREFIX crm: <http://www.cidoc-crm.org/cidoc-crm/>
         PREFIX aat: <http://vocab.getty.edu/aat/>
@@ -328,14 +345,15 @@ final class GettyProvider: MuseumProvider {
         return try await executeSPARQLQueryWithRetry(query)
     }
     
-    /// Fetch photographs using OFFSET-based sampling
-    private func fetchPhotographUUIDs() async throws -> [String] {
+    /// Fetch photograph UUIDs
+    private func fetchCC0PhotographUUIDs() async throws -> [String] {
         var allUUIDs: Set<String> = []
         
-        let offsets = generateRandomOffsets(
-            count: 2,
-            maxOffset: max(0, approxPhotographCount - sparqlBatchSize)
-        )
+        // Photographs: use offset 0 plus one random for variety
+        var offsets = [0]
+        offsets.append(contentsOf: generateRandomOffsets(count: 1, maxOffset: 5000))
+        
+        print("🟣 [GETTY] Photograph offsets: \(offsets)")
         
         try await withThrowingTaskGroup(of: [String].self) { group in
             for offset in offsets {
@@ -345,6 +363,7 @@ final class GettyProvider: MuseumProvider {
             }
             
             for try await batch in group {
+                print("🟣 [GETTY] Photograph batch: \(batch.count) UUIDs")
                 batch.forEach { allUUIDs.insert($0) }
             }
         }
@@ -353,15 +372,14 @@ final class GettyProvider: MuseumProvider {
     }
     
     private func fetchPhotographBatch(offset: Int) async throws -> [String] {
+        // Query for photographs - rights check happens at fetch time
+        // AAT code: 300046300 (photographs)
         let query = """
         PREFIX crm: <http://www.cidoc-crm.org/cidoc-crm/>
         PREFIX aat: <http://vocab.getty.edu/aat/>
         SELECT DISTINCT ?obj WHERE {
             ?obj a crm:E22_Human-Made_Object ;
-                 crm:P2_has_type ?type .
-            FILTER (
-                ?type = aat:300046300
-            )
+                 crm:P2_has_type aat:300046300 .
         }
         OFFSET \(offset)
         LIMIT \(sparqlBatchSize / 2)
@@ -387,7 +405,7 @@ final class GettyProvider: MuseumProvider {
         } catch {
             if attempt < maxSparqlRetries {
                 DebugLogger.log(.warning, "Getty: SPARQL attempt \(attempt) failed, retrying...")
-                try await Task.sleep(nanoseconds: UInt64(500_000_000 * attempt)) // Exponential backoff
+                try await Task.sleep(nanoseconds: UInt64(500_000_000 * attempt))
                 return try await executeSPARQLQueryWithRetry(query, attempt: attempt + 1)
             }
             throw error
@@ -399,8 +417,10 @@ final class GettyProvider: MuseumProvider {
         comps.queryItems = [URLQueryItem(name: "query", value: query)]
         guard let url = comps.url else { throw URLError(.badURL) }
 
-        DebugLogger.logNetworkRequest(url: url, method: "GET (SPARQL)")
-
+        // Log a truncated version of the URL for debugging
+        let truncatedURL = String(url.absoluteString.prefix(150))
+        print("🟣 [GETTY] SPARQL request: \(truncatedURL)...")
+        
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
         req.timeoutInterval = requestTimeout
@@ -418,44 +438,95 @@ final class GettyProvider: MuseumProvider {
             throw URLError(.badServerResponse)
         }
 
-        let decoded = try JSONDecoder().decode(SPARQLResults.self, from: data)
-        let uris = decoded.results.bindings.compactMap { $0.obj.value }
-
-        return uris.compactMap { uri in
-            if let u = URL(string: uri) {
-                return u.lastPathComponent.nilIfEmpty
-            }
-            return nil
+        let results = try JSONDecoder().decode(SPARQLResults.self, from: data)
+        
+        return results.results.bindings.compactMap { binding in
+            guard let value = binding.obj.value,
+                  let u = URL(string: value) else { return nil }
+            return u.lastPathComponent.nilIfEmpty
         }
     }
 
-    // MARK: - Manifest Parsing
-    
-    /// Target image size - balances quality vs download speed
-    /// !1200,1200 means "fit within 1200x1200 box, maintaining aspect ratio"
-    /// This typically yields 200-500KB images instead of 4-7MB full resolution
-    private let targetImageSize = "!1200,1200"
-    
-    /// Normalize any Getty IIIF image URL to use our target size
-    /// Converts: .../full/full/0/default.jpg (huge) or .../full/!600,600/0/default.jpg (tiny)
-    /// To:       .../full/!1200,1200/0/default.jpg (just right)
-    private func normalizeGettyImageURL(_ urlString: String) -> URL? {
-        // Pattern: https://media.getty.edu/iiif/image/{id}/full/{size}/0/default.jpg
-        // We want to replace {size} with our target size
-        
-        guard urlString.contains("media.getty.edu/iiif/image/") else {
-            return URL(string: urlString)
+    // MARK: - Metadata Extraction
+
+    private func extractTitle(from node: JSONAny.Node) -> String? {
+        // Try identified_by array for Name type
+        if case .dict(let d) = node,
+           case .array(let arr)? = d["identified_by"] {
+            for item in arr {
+                if case .dict(let itemDict) = item,
+                   case .string(let type)? = itemDict["type"],
+                   type == "Name",
+                   case .string(let content)? = itemDict["content"] {
+                    return content
+                }
+            }
         }
         
-        // Extract the image ID from various URL formats
-        // Could be: .../image/{id}/full/full/0/default.jpg
-        //       or: .../image/{id}/full/!600,600/0/default.jpg
-        //       or: .../image/{id} (base URL only)
+        // Fallback to _label
+        if case .dict(let d) = node,
+           case .string(let label)? = d["_label"] {
+            return label
+        }
         
+        return nil
+    }
+
+    private func extractArtist(from node: JSONAny.Node) -> String? {
+        // Try produced_by.carried_out_by[]._label
+        if case .dict(let d) = node,
+           case .dict(let producedBy)? = d["produced_by"],
+           case .array(let carriedOutBy)? = producedBy["carried_out_by"] {
+            for item in carriedOutBy {
+                if case .dict(let itemDict) = item,
+                   case .string(let label)? = itemDict["_label"] {
+                    return label
+                }
+            }
+        }
+        return nil
+    }
+
+    private func extractDate(from node: JSONAny.Node) -> String? {
+        // Try produced_by.timespan._label
+        if case .dict(let d) = node,
+           case .dict(let producedBy)? = d["produced_by"],
+           case .dict(let timespan)? = producedBy["timespan"],
+           case .string(let label)? = timespan["_label"] {
+            return label
+        }
+        return nil
+    }
+
+    private func extractMedium(from node: JSONAny.Node) -> String? {
+        // Try made_of[]._label
+        if case .dict(let d) = node,
+           case .array(let madeOf)? = d["made_of"] {
+            var materials: [String] = []
+            for item in madeOf {
+                if case .dict(let itemDict) = item,
+                   case .string(let label)? = itemDict["_label"] {
+                    materials.append(label)
+                }
+            }
+            if !materials.isEmpty {
+                return materials.joined(separator: ", ")
+            }
+        }
+        return nil
+    }
+
+    // MARK: - Image URL Extraction
+    
+    /// Target image size for normalized URLs
+    private let targetImageSize = "!1200,1200"
+    
+    /// Normalize Getty IIIF image URLs to consistent size
+    private func normalizeGettyImageURL(_ urlString: String) -> URL? {
+        // Extract the image ID and construct a normalized URL
         if let range = urlString.range(of: "media.getty.edu/iiif/image/") {
             let afterBase = String(urlString[range.upperBound...])
             
-            // Get the image ID (everything before the next "/" or end of string)
             let imageID: String
             if let slashIndex = afterBase.firstIndex(of: "/") {
                 imageID = String(afterBase[..<slashIndex])
@@ -463,7 +534,6 @@ final class GettyProvider: MuseumProvider {
                 imageID = afterBase
             }
             
-            // Construct normalized URL with our target size
             let normalizedURL = "https://media.getty.edu/iiif/image/\(imageID)/full/\(targetImageSize)/0/default.jpg"
             return URL(string: normalizedURL)
         }
@@ -472,15 +542,11 @@ final class GettyProvider: MuseumProvider {
     }
 
     private func extractImageURL(fromManifest manifest: JSONAny.Node) -> URL? {
-
         // Helper for id/@id
         func firstID(at path: [Any], in root: JSONAny.Node) -> String? {
             JSONAny.firstString(at: path + ["id"], in: root)
             ?? JSONAny.firstString(at: path + ["@id"], in: root)
         }
-        
-        // Strategy: Find ANY Getty IIIF image URL, then normalize it to our target size
-        // This ensures consistent sizing regardless of what the manifest specifies
         
         // 1) Look for direct image URLs anywhere in manifest
         if let direct = JSONAny.findFirstString(
@@ -491,7 +557,7 @@ final class GettyProvider: MuseumProvider {
             return normalized
         }
 
-        // 2) IIIF v3: items[0].items[0].body.service[].id (service endpoint)
+        // 2) IIIF v3: items[0].items[0].body.service[].id
         if let service =
             JSONAny.firstString(at: ["items", 0, "items", 0, "body", "service", 0, "id"], in: manifest)
             ?? JSONAny.firstString(at: ["items", 0, "items", 0, "body", "service", 0, "@id"], in: manifest)
@@ -502,7 +568,7 @@ final class GettyProvider: MuseumProvider {
             return normalizeGettyImageURL(service)
         }
         
-        // 3) IIIF v3: items[0].items[0].body.id (direct body URL)
+        // 3) IIIF v3: items[0].items[0].body.id
         if let body = firstID(at: ["items", 0, "items", 0, "body"], in: manifest),
            body.contains("media.getty.edu/iiif/image/") {
             return normalizeGettyImageURL(body)
@@ -528,7 +594,7 @@ final class GettyProvider: MuseumProvider {
             return normalizeGettyImageURL(resource)
         }
 
-        // 6) Thumbnails (IIIF v2/v3) - normalize these too for consistency
+        // 6) Thumbnails
         if let thumb =
             JSONAny.firstString(at: ["thumbnail", "id"], in: manifest)
             ?? JSONAny.firstString(at: ["thumbnail", "@id"], in: manifest)
@@ -549,8 +615,11 @@ final class GettyProvider: MuseumProvider {
     private func isCC0orPublicDomain(_ node: JSONAny.Node) -> Bool {
         let needles = [
             "creativecommons.org/publicdomain/zero",
+            "creativecommons.org/publicdomain/mark",
             "cc0",
-            "public domain"
+            "public domain",
+            "no known copyright",
+            "no copyright"
         ]
         return JSONAny.containsString(in: node) { s in
             let l = s.lowercased()

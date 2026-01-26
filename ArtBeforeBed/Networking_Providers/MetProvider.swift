@@ -77,28 +77,30 @@ final class MetProvider: MuseumProvider {
         DebugLogger.logProviderStart("Met", query: query)
         
         print("🔵 [MET] === FETCH REQUEST ===")
-        print("🔵 [MET] Query: '\(query.isEmpty ? "*" : query)' (ignoring - using department-based curation)")
-        print("🔵 [MET] Medium filter: \(medium ?? "none") (ignoring - departments define content)")
+        print("🔵 [MET] Medium filter: \(medium ?? "all")")
         print("🔵 [MET] Geo filter: \(geo ?? "none")")
         print("🔵 [MET] Period: \(period)")
         
-        // Strategy: Query each department with wildcard to get maximum variety
-        // Departments naturally provide different content types:
-        // - Dept 9: Prints & Drawings
-        // - Dept 11: Paintings (European)
-        // - Dept 19: Photographs
-        // - Dept 21: Paintings (Modern)
-        // - Dept 15: Paintings & Drawings (Lehman)
+        // Map medium filter to departments
+        let departments = departmentsForMedium(medium)
+        print("🔵 [MET] Querying departments: \(departments)")
         
-        // Fetch IDs from each curated department in parallel
-        // Use "*" wildcard to get full collection from each department
-        async let dept9IDs = fetchIDsForDepartment(9, query: "*", medium: nil, geo: geo, period: period)   // Drawings and Prints
-        async let dept11IDs = fetchIDsForDepartment(11, query: "*", medium: nil, geo: geo, period: period) // European Paintings
-        async let dept19IDs = fetchIDsForDepartment(19, query: "*", medium: nil, geo: geo, period: period) // Photographs
-        async let dept21IDs = fetchIDsForDepartment(21, query: "*", medium: nil, geo: geo, period: period) // Modern Art
-        async let dept1IDs = fetchIDsForDepartment(1, query: "*", medium: nil, geo: geo, period: period)   // American Decorative Arts (filtered)
+        // Fetch IDs from selected departments in parallel
+        var results: [[String]] = []
         
-        let results = await [dept9IDs, dept11IDs, dept19IDs, dept21IDs, dept1IDs]
+        await withTaskGroup(of: (Int, [String]).self) { group in
+            for dept in departments {
+                group.addTask {
+                    let ids = await self.fetchIDsForDepartment(dept, query: "*", medium: nil, geo: geo, period: period)
+                    return (dept, ids)
+                }
+            }
+            
+            for await (dept, ids) in group {
+                print("🔵 [MET] Department \(dept): \(ids.count) IDs")
+                results.append(ids)
+            }
+        }
         
         // Combine all IDs
         var allIDs: [String] = []
@@ -110,36 +112,13 @@ final class MetProvider: MuseumProvider {
             throw URLError(.cannotLoadFromNetwork)
         }
         
-        // Log department distribution before shuffling
-        print("🔵 [MET] === DEPARTMENT DISTRIBUTION ===")
-        print("🔵 [MET] Drawings & Prints (9): \(results[0].count)")
-        print("🔵 [MET] European Paintings (11): \(results[1].count)")
-        print("🔵 [MET] Photographs (19): \(results[2].count)")
-        print("🔵 [MET] Modern Art (21): \(results[3].count)")
-        print("🔵 [MET] American Decorative Arts (1): \(results[4].count) (filtered to paintings/drawings/paper/graphite)")
         print("🔵 [MET] Total before shuffle: \(allIDs.count)")
         
         // Shuffle and limit
         let finalIDs = Array(allIDs.shuffled().prefix(2000))
         
-        print("🔵 [MET] === FINAL SELECTION ===")
         print("🔵 [MET] Final count after shuffle/limit: \(finalIDs.count)")
         
-        // Calculate rough distribution in final selection
-        let dept9Count = finalIDs.filter { $0.contains(":") && results[0].contains($0) }.count
-        let dept11Count = finalIDs.filter { $0.contains(":") && results[1].contains($0) }.count
-        let dept19Count = finalIDs.filter { $0.contains(":") && results[2].contains($0) }.count
-        let dept21Count = finalIDs.filter { $0.contains(":") && results[3].contains($0) }.count
-        let dept1Count = finalIDs.filter { $0.contains(":") && results[4].contains($0) }.count
-        
-        print("🔵 [MET] Estimated final distribution:")
-        print("🔵 [MET]   Drawings & Prints: ~\(dept9Count) (\(Int(Double(dept9Count)/Double(finalIDs.count)*100))%)")
-        print("🔵 [MET]   European Paintings: ~\(dept11Count) (\(Int(Double(dept11Count)/Double(finalIDs.count)*100))%)")
-        print("🔵 [MET]   Photographs: ~\(dept19Count) (\(Int(Double(dept19Count)/Double(finalIDs.count)*100))%)")
-        print("🔵 [MET]   Modern Art: ~\(dept21Count) (\(Int(Double(dept21Count)/Double(finalIDs.count)*100))%)")
-        print("🔵 [MET]   American Decorative Arts: ~\(dept1Count) (\(Int(Double(dept1Count)/Double(finalIDs.count)*100))%)")
-        
-        // Sample some IDs to verify randomization
         if finalIDs.count >= 10 {
             let sample = finalIDs.prefix(10).map { $0.replacingOccurrences(of: "met:", with: "") }
             print("🔵 [MET] Sample IDs (first 10): \(sample.joined(separator: ", "))")
@@ -148,6 +127,31 @@ final class MetProvider: MuseumProvider {
         DebugLogger.logProviderSuccess("Met", idCount: finalIDs.count)
         
         return finalIDs
+    }
+    
+    /// Maps user-facing medium filter to Met department IDs
+    private func departmentsForMedium(_ medium: String?) -> [Int] {
+        guard let medium = medium?.lowercased() else {
+            // No filter = all curated departments
+            return [9, 11, 19, 21, 1]
+        }
+        
+        switch medium {
+        case "paintings":
+            // Dept 11: European Paintings, Dept 21: Modern Art, Dept 1: American (paintings)
+            return [11, 21, 1]
+        case "drawings":
+            // Dept 9: Drawings and Prints (includes drawings)
+            return [9]
+        case "prints":
+            // Dept 9: Drawings and Prints (includes prints)
+            return [9]
+        case "photographs":
+            // Dept 19: Photographs
+            return [19]
+        default:
+            return [9, 11, 19, 21, 1]
+        }
     }
     
     /// Fetches IDs for a specific department

@@ -32,22 +32,32 @@ final class AICProvider: MuseumProvider {
         DebugLogger.logProviderStart("AIC", query: query)
         
         print("🟡 [AIC] === FETCH REQUEST ===")
+        print("🟡 [AIC] Medium filter: \(medium ?? "all")")
         print("🟡 [AIC] Using /search endpoint with type filtering")
-        print("🟡 [AIC] Random page selection for maximum variety")
         
-        // Fetch different artwork types in parallel with EQUAL page counts for even distribution
-        // Each type gets the same number of pages to ensure balanced representation
-        let pagesPerType = 5
+        // Map medium filter to artwork types
+        let typesToFetch = artworkTypesForMedium(medium)
+        print("🟡 [AIC] Fetching types: \(typesToFetch)")
         
-        async let paintingIDs = fetchIDsForType("Painting", pages: pagesPerType)
-        async let printIDs = fetchIDsForType("Print", pages: pagesPerType)
-        async let drawingIDs = fetchIDsForType("Drawing and Watercolor", pages: pagesPerType)
-        async let photographIDs = fetchIDsForType("Photograph", pages: pagesPerType)
+        // Fetch selected types in parallel
+        var results: [(String, [Int])] = []
         
-        let results = await [paintingIDs, printIDs, drawingIDs, photographIDs]
+        await withTaskGroup(of: (String, [Int]).self) { group in
+            for artType in typesToFetch {
+                group.addTask {
+                    let ids = await self.fetchIDsForType(artType, pages: 5)
+                    return (artType, ids)
+                }
+            }
+            
+            for await (artType, ids) in group {
+                print("🟡 [AIC] \(artType): \(ids.count) IDs")
+                results.append((artType, ids))
+            }
+        }
         
-        // If type filtering didn't work, fall back to all public domain
-        let hasResults = results.contains { !$0.isEmpty }
+        // Check if we got any results
+        let hasResults = results.contains { !$0.1.isEmpty }
         guard hasResults else {
             print("🟡 [AIC] ⚠️ Type filters returned 0 results, using all public domain")
             let fallbackIDs = await fetchAllPublicDomain(pages: 20)
@@ -62,30 +72,26 @@ final class AICProvider: MuseumProvider {
         }
         
         print("🟡 [AIC] === TYPE DISTRIBUTION ===")
-        print("🟡 [AIC] Paintings: \(results[0].count)")
-        print("🟡 [AIC] Prints: \(results[1].count)")
-        print("🟡 [AIC] Drawings: \(results[2].count)")
-        print("🟡 [AIC] Photographs: \(results[3].count)")
+        for (artType, ids) in results {
+            print("🟡 [AIC] \(artType): \(ids.count)")
+        }
         
-        // Build a balanced mix by taking equal amounts from each type
-        // This ensures even representation regardless of collection sizes
-        let targetPerType = maxIDsPerLoad / 4  // 125 each for 500 total
+        // Build balanced mix - equal amounts from each type
+        let targetPerType = maxIDsPerLoad / max(1, typesToFetch.count)
         
         var balancedIDs: [Int] = []
-        for (index, typeIDs) in results.enumerated() {
+        for (artType, typeIDs) in results {
             let shuffled = typeIDs.shuffled()
             let selected = Array(shuffled.prefix(targetPerType))
             balancedIDs.append(contentsOf: selected)
-            
-            let typeNames = ["Paintings", "Prints", "Drawings", "Photographs"]
-            print("🟡 [AIC] Selected \(selected.count) \(typeNames[index])")
+            print("🟡 [AIC] Selected \(selected.count) \(artType)")
         }
         
         // Final shuffle to interleave types
         let finalIDs = balancedIDs.shuffled().map { "\(providerID):\($0)" }
         
         print("🟡 [AIC] Total unique: \(Set(balancedIDs).count)")
-        print("🟡 [AIC] Final selection: \(finalIDs.count) IDs (balanced mix)")
+        print("🟡 [AIC] Final selection: \(finalIDs.count) IDs")
         
         if finalIDs.count >= 10 {
             let sample = finalIDs.prefix(10).map { $0.replacingOccurrences(of: "aic:", with: "") }
@@ -95,6 +101,27 @@ final class AICProvider: MuseumProvider {
         DebugLogger.logProviderSuccess("AIC", idCount: finalIDs.count)
         
         return finalIDs
+    }
+    
+    /// Maps user-facing medium filter to AIC artwork_type_title values
+    private func artworkTypesForMedium(_ medium: String?) -> [String] {
+        guard let medium = medium?.lowercased() else {
+            // No filter = all types
+            return ["Painting", "Print", "Drawing and Watercolor", "Photograph"]
+        }
+        
+        switch medium {
+        case "paintings":
+            return ["Painting"]
+        case "drawings":
+            return ["Drawing and Watercolor"]
+        case "prints":
+            return ["Print"]
+        case "photographs":
+            return ["Photograph"]
+        default:
+            return ["Painting", "Print", "Drawing and Watercolor", "Photograph"]
+        }
     }
     
     /// Fetch IDs for a specific artwork type using the /search endpoint
