@@ -6,6 +6,11 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		0EB696D12F297F9C00F2EF56 /* TelemetryClient in Frameworks */ = {isa = PBXBuildFile; productRef = 0EB696D02F297F9C00F2EF56 /* TelemetryClient */; };
+		0EB696D32F297F9C00F2EF56 /* TelemetryDeck in Frameworks */ = {isa = PBXBuildFile; productRef = 0EB696D22F297F9C00F2EF56 /* TelemetryDeck */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		0E471B202F1860410040089F /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +57,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0EB696D12F297F9C00F2EF56 /* TelemetryClient in Frameworks */,
+				0EB696D32F297F9C00F2EF56 /* TelemetryDeck in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +119,8 @@
 			);
 			name = ArtBeforeBed;
 			packageProductDependencies = (
+				0EB696D02F297F9C00F2EF56 /* TelemetryClient */,
+				0EB696D22F297F9C00F2EF56 /* TelemetryDeck */,
 			);
 			productName = ArtBeforeBed;
 			productReference = 0E471B102F18603F0040089F /* ArtBeforeBed.app */;
@@ -195,6 +204,9 @@
 			);
 			mainGroup = 0E471B072F18603F0040089F;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				0EB696CF2F297F9C00F2EF56 /* XCRemoteSwiftPackageReference "SwiftClient" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 0E471B112F18603F0040089F /* Products */;
 			projectDirPath = "";
@@ -409,7 +421,7 @@
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.6;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.6;
@@ -454,7 +466,7 @@
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.6;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.6;
@@ -617,6 +629,30 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		0EB696CF2F297F9C00F2EF56 /* XCRemoteSwiftPackageReference "SwiftClient" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/TelemetryDeck/SwiftClient";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.11.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		0EB696D02F297F9C00F2EF56 /* TelemetryClient */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0EB696CF2F297F9C00F2EF56 /* XCRemoteSwiftPackageReference "SwiftClient" */;
+			productName = TelemetryClient;
+		};
+		0EB696D22F297F9C00F2EF56 /* TelemetryDeck */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0EB696CF2F297F9C00F2EF56 /* XCRemoteSwiftPackageReference "SwiftClient" */;
+			productName = TelemetryDeck;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 0E471B082F18603F0040089F /* Project object */;
 }

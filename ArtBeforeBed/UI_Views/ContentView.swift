@@ -24,17 +24,25 @@ struct ContentView: View {
                         withAnimation(.easeInOut(duration: 0.2)) {
                             isInfoVisible.toggle()
                         }
+                        announceInfoPanel()
                     }
                 )
                 .ignoresSafeArea()
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel(vm.current.map { "\($0.title) by \($0.artist)" } ?? "Artwork")
-                .accessibilityHint("Double tap to \(isInfoVisible ? "hide" : "show") artwork details. Swipe left for next artwork, swipe right for previous.")
-                .accessibilityAddTraits(.isImage)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(artworkAccessibilityLabel)
+                .accessibilityHint("Swipe left or right to change artwork. Tap to \(isInfoVisible ? "hide" : "show") info.")
+                .accessibilityAddTraits(.allowsDirectInteraction)
                 
                 // SwiftUI overlays
                 VStack {
                     topBar
+                    
+                    // Offline banner when connection lost mid-browse
+                    if vm.isOffline {
+                        offlineBanner
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                    
                     Spacer()
                     
                     if isInfoVisible, let art = vm.current {
@@ -43,8 +51,11 @@ struct ContentView: View {
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
                 }
+                .animation(.easeInOut(duration: 0.3), value: vm.isOffline)
                 .animation(.easeInOut(duration: 0.2), value: isInfoVisible)
                 
+            } else if vm.isOffline {
+                offlineView
             } else if let err = vm.errorMessage {
                 errorView(error: err)
             }
@@ -62,7 +73,83 @@ struct ContentView: View {
         }
     }
     
+    // MARK: - Accessibility
+    
+    private var artworkAccessibilityLabel: String {
+        guard let art = vm.current else { return "Artwork" }
+        var label = "\(art.title) by \(art.artist)"
+        if let date = art.date, !date.isEmpty {
+            label += ", \(date)"
+        }
+        return label
+    }
+    
+    private func announceInfoPanel() {
+        // Announce after toggle completes (isInfoVisible has new value after toggle)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            if isInfoVisible, let art = vm.current {
+                let announcement = infoPanelAccessibilityLabel(for: art)
+                UIAccessibility.post(notification: .announcement, argument: announcement)
+            }
+        }
+    }
+    
+    private func infoPanelAccessibilityLabel(for art: Artwork) -> String {
+        var parts = [art.title, "by \(art.artist)", art.source]
+        if let date = art.date, !date.isEmpty {
+            parts.append(date)
+        }
+        if let medium = art.medium, !medium.isEmpty {
+            parts.append(medium)
+        }
+        return parts.joined(separator: ". ")
+    }
+    
     // MARK: - UI Components
+    
+    private var offlineBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "wifi.slash")
+                .font(.system(size: 14, weight: .medium))
+            
+            Text("No connection")
+                .font(.system(size: 14, weight: .medium))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.red.opacity(0.85))
+        .clipShape(Capsule())
+        .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("No internet connection")
+    }
+    
+    private var offlineView: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "wifi.slash")
+                .font(.system(size: 48))
+                .foregroundStyle(.white.opacity(0.6))
+            
+            Text("No Connection")
+                .foregroundStyle(.white)
+                .font(.title2.weight(.semibold))
+                .accessibilityAddTraits(.isHeader)
+            
+            Text("Waiting for internet connection...")
+                .foregroundStyle(.white.opacity(0.7))
+                .font(.subheadline)
+                .multilineTextAlignment(.center)
+            
+            ProgressView()
+                .progressViewStyle(CircularProgressViewStyle(tint: .white.opacity(0.6)))
+                .scaleEffect(1.2)
+                .padding(.top, 8)
+        }
+        .padding()
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("No internet connection. Waiting to reconnect.")
+    }
     
     private func errorView(error: String) -> some View {
         VStack(spacing: 12) {
@@ -115,7 +202,6 @@ struct ContentView: View {
             Text(art.title)
                 .foregroundStyle(.white)
                 .font(.headline)
-                .accessibilityAddTraits(.isHeader)
             
             Text(art.artist)
                 .foregroundStyle(.white.opacity(0.85))
@@ -129,33 +215,29 @@ struct ContentView: View {
             }
             .foregroundStyle(.white.opacity(0.75))
             .font(.caption)
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel(art.date.map { "\(art.source), \($0)" } ?? art.source)
             
             if let m = art.medium, !m.isEmpty {
                 Text(m)
                     .foregroundStyle(.white.opacity(0.7))
                     .font(.caption2)
-                    .accessibilityLabel("Medium: \(m)")
             }
             
             Button {
                 showDebug = true
             } label: {
-                Label("Debug / Share metadata", systemImage: "square.and.arrow.up")
+                Label("Share", systemImage: "square.and.arrow.up")
                     .font(.caption.weight(.semibold))
             }
             .buttonStyle(.bordered)
             .tint(.white.opacity(0.15))
-            .accessibilityLabel("Share artwork details")
-            .accessibilityHint("Opens sharing and debug options")
+            .accessibilityHidden(true)
         }
         .padding(14)
         .background(.black.opacity(0.6))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .padding(.horizontal, 14)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Artwork information")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(infoPanelAccessibilityLabel(for: art))
     }
 }
 

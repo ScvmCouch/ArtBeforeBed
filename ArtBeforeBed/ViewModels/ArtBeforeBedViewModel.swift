@@ -9,15 +9,12 @@ final class ArtBeforeBedViewModel: ObservableObject {
     
     @Published var current: Artwork?
     @Published var nextArt: Artwork?
-    
-    /// Whether there's a next artwork ready (even if image isn't loaded yet)
-    var hasNextArtwork: Bool { nextArt != nil }
-    
     @Published var prevArt: Artwork?
     
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var isAdvancing: Bool = false
+    @Published var isOffline: Bool = false
     
     // Published images for the carousel - these drive the UI
     @Published var currentImage: UIImage?
@@ -76,6 +73,10 @@ final class ArtBeforeBedViewModel: ObservableObject {
     private let maxAutoRetries = 1
     private let retryDelayNs: UInt64 = 600_000_000
     
+    // Network monitoring
+    private var networkCancellable: AnyCancellable?
+    private var pendingRetryOnReconnect = false
+    
     // MARK: - Prefetch Queue
     // Keep a buffer of pre-fetched artworks ready to go
     private var prefetchedArtworks: [Artwork] = []
@@ -85,6 +86,29 @@ final class ArtBeforeBedViewModel: ObservableObject {
     // Track artworks whose images failed to load - don't reuse them
     private var failedImageURLs: Set<URL> = []
     
+    // MARK: - Initialization
+    
+    init() {
+        setupNetworkMonitoring()
+    }
+    
+    private func setupNetworkMonitoring() {
+        networkCancellable = NetworkMonitor.shared.$isConnected
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isConnected in
+                guard let self = self else { return }
+                self.isOffline = !isConnected
+                
+                // Auto-retry when connection returns
+                if isConnected && self.pendingRetryOnReconnect {
+                    self.pendingRetryOnReconnect = false
+                    Task {
+                        await self.start()
+                    }
+                }
+            }
+    }
+    
     // MARK: - Public Methods
     
     func start() async {
@@ -93,11 +117,39 @@ final class ArtBeforeBedViewModel: ObservableObject {
             self.clearHistory()
             self.prefetchedArtworks.removeAll()
             
-            try await self.loadNextArtworkAndPushToHistory()
+            // Try to load initial artwork with retries for failed images
+            var loadedSuccessfully = false
+            for attempt in 1...5 {
+                try await self.loadNextArtworkAndPushToHistory()
+                
+                guard let current = self.current else {
+                    print("🔴 [START] Attempt \(attempt): No artwork loaded")
+                    continue
+                }
+                
+                // Try to load the image
+                let image = await ImageCache.shared.loadImage(for: current.imageURL)
+                
+                if let image {
+                    self.currentImage = image
+                    loadedSuccessfully = true
+                    print("🟢 [START] Successfully loaded initial artwork on attempt \(attempt)")
+                    break
+                } else {
+                    // Image failed - mark it and try another
+                    print("🔴 [START] Attempt \(attempt): Image failed for \(current.id)")
+                    self.failedImageURLs.insert(current.imageURL)
+                    
+                    // Remove failed artwork from history
+                    if self.historyIndex >= 0 && self.historyIndex < self.history.count {
+                        self.history.remove(at: self.historyIndex)
+                        self.historyIndex = max(-1, self.historyIndex - 1)
+                    }
+                }
+            }
             
-            // Load the current image before showing
-            if let current = self.current {
-                self.currentImage = await ImageCache.shared.loadImage(for: current.imageURL)
+            if !loadedSuccessfully {
+                throw URLError(.cannotLoadFromNetwork)
             }
             
             // Start aggressive prefetching in background
@@ -158,16 +210,46 @@ final class ArtBeforeBedViewModel: ObservableObject {
                     if let loadedImage {
                         currentImage = loadedImage
                     } else {
-                        // Image failed to load - mark it and try to get another artwork
+                        // Image failed to load - remove from history and try another
                         print("🔴 [SWIPE] Image failed to load for \(next.id), skipping...")
                         failedImageURLs.insert(next.imageURL)
                         
-                        // Try to load another artwork
-                        await prefetchNeighbors()
-                        if let fallbackNext = nextArt {
-                            pushToHistory(fallbackNext)
+                        // Pop the failed artwork from history
+                        if historyIndex >= 0 && historyIndex < history.count {
+                            history.remove(at: historyIndex)
+                            historyIndex = max(0, historyIndex - 1)
+                        }
+                        
+                        // Try up to 3 fallback artworks
+                        var foundWorking = false
+                        for attempt in 1...3 {
+                            await prefetchNeighbors()
+                            guard let fallbackNext = nextArt else {
+                                print("🔴 [SWIPE] No fallback artwork available (attempt \(attempt))")
+                                break
+                            }
+                            
                             nextArt = nil
-                            currentImage = await ImageCache.shared.loadImage(for: fallbackNext.imageURL)
+                            let fallbackImage = await ImageCache.shared.loadImage(for: fallbackNext.imageURL)
+                            
+                            if let fallbackImage {
+                                pushToHistory(fallbackNext)
+                                currentImage = fallbackImage
+                                foundWorking = true
+                                print("🟢 [SWIPE] Fallback succeeded on attempt \(attempt): \(fallbackNext.id)")
+                                break
+                            } else {
+                                print("🔴 [SWIPE] Fallback \(attempt) failed: \(fallbackNext.id)")
+                                failedImageURLs.insert(fallbackNext.imageURL)
+                            }
+                        }
+                        
+                        // If all fallbacks failed, restore previous image
+                        if !foundWorking {
+                            print("🔴 [SWIPE] All fallbacks failed, staying on current")
+                            if let current {
+                                currentImage = await ImageCache.shared.loadImage(for: current.imageURL)
+                            }
                         }
                     }
                 }
@@ -238,12 +320,29 @@ final class ArtBeforeBedViewModel: ObservableObject {
         errorMessage = nil
         isAdvancing = false
         
+        // Check if offline before attempting
+        if !NetworkMonitor.shared.isConnected {
+            isOffline = true
+            pendingRetryOnReconnect = true
+            isLoading = false
+            return
+        }
+        
         var attempt = 0
         while true {
             do {
                 try await block()
+                isOffline = false
+                pendingRetryOnReconnect = false
                 break
             } catch {
+                // Check if error is due to network
+                if !NetworkMonitor.shared.isConnected {
+                    isOffline = true
+                    pendingRetryOnReconnect = true
+                    break
+                }
+                
                 if attempt < maxAutoRetries {
                     attempt += 1
                     try? await Task.sleep(nanoseconds: retryDelayNs)

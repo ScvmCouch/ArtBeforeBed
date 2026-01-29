@@ -110,12 +110,29 @@ final class CMAProvider: MuseumProvider {
     
     /// Fetch from a specific collection
     private func fetchFromCollection(collection: String, query: String, limit: Int) async throws -> [Int] {
+        // Use collection-appropriate skip to avoid overshooting smaller collections
+        let maxSkip = estimateMaxSkip(for: collection)
+        let skip = Int.random(in: 0...maxSkip)
+        
+        var ids = try await fetchCollectionPage(collection: collection, query: query, limit: limit, skip: skip)
+        
+        // If we got 0 results and we skipped, retry from the beginning
+        if ids.isEmpty && skip > 0 {
+            DebugLogger.log(.info, "CMA: '\(collection)' empty at skip=\(skip), retrying from 0")
+            ids = try await fetchCollectionPage(collection: collection, query: query, limit: limit, skip: 0)
+        }
+        
+        return ids
+    }
+    
+    /// Execute the actual API request for a collection page
+    private func fetchCollectionPage(collection: String, query: String, limit: Int, skip: Int) async throws -> [Int] {
         var comps = URLComponents(string: "\(base)/artworks/")!
         var items: [URLQueryItem] = [
             URLQueryItem(name: "cc0", value: ""),
             URLQueryItem(name: "has_image", value: "1"),
             URLQueryItem(name: "limit", value: String(limit)),
-            URLQueryItem(name: "skip", value: String(Int.random(in: 0...200))),
+            URLQueryItem(name: "skip", value: String(skip)),
             URLQueryItem(name: "collection", value: collection)
         ]
         
@@ -130,6 +147,50 @@ final class CMAProvider: MuseumProvider {
         DebugLogger.logNetworkRequest(url: url)
         let resp: CMASearchResponse = try await fetchJSON(url: url)
         return resp.data.map { $0.id }
+    }
+    
+    /// Estimate safe max skip based on known collection sizes
+    /// These are conservative estimates to avoid overshooting
+    /// Most painting collections are quite small (under 50 items with CC0)
+    private func estimateMaxSkip(for collection: String) -> Int {
+        switch collection {
+        // Large collections (500+ items) - can skip more
+        case "DR - Italian", "DR - French", "DR - American 19th Century",
+             "PR - Etching", "PR - Lithograph", "PR - Woodcut":
+            return 400
+            
+        // Medium-large collections (200-500 items)
+        case "Mod Euro - Painting 1800-1960",
+             "American - Painting", "DR - German", "DR - American 20th Century":
+            return 150
+            
+        // Medium collections (100-200 items)
+        case "Drawings", "Prints",
+             "P - Italian 16th & 17th Century":
+            return 50
+            
+        // Small painting collections (under 100 CC0 items) - very conservative
+        case "P - Italian 15th Century and earlier",
+             "P - Italian 18th Century",
+             "P - Netherlandish-Dutch",
+             "P - Netherlandish-Flemish",
+             "P - French & Austria 16th C. and earlier",
+             "P - French 17th Century",
+             "P - French 18th Century",
+             "P - Spanish before 1800",
+             "P - British before 1800",
+             "P - German before 1800",
+             "P - Miscellaneous":
+            return 10
+            
+        // Photography - unknown size, be conservative
+        case "Photography":
+            return 30
+            
+        // Default conservative
+        default:
+            return 20
+        }
     }
     
     /// Build list of collections based on medium filter
@@ -191,31 +252,53 @@ final class CMAProvider: MuseumProvider {
     }
     
     /// Build painting collections, optionally filtered by geography
+    /// Collection names must match CMA's actual department/collection values
     private func buildPaintingCollections(geo: String?) -> [String] {
         // Check for geography filter
         if let geo = geo?.lowercased() {
             if geo.contains("united states") || geo.contains("america") {
                 return ["American - Painting"]
-            } else if geo.contains("france") || geo.contains("spain") {
-                return ["P - French & Spanish 17th & 18th Century", "Mod Euro - Painting 1800-1960"]
+            } else if geo.contains("france") {
+                return [
+                    "P - French & Austria 16th C. and earlier",
+                    "P - French 17th Century",
+                    "P - French 18th Century",
+                    "Mod Euro - Painting 1800-1960"
+                ]
+            } else if geo.contains("spain") {
+                return ["P - Spanish before 1800", "Mod Euro - Painting 1800-1960"]
             } else if geo.contains("italy") {
-                return ["P - Italian 14th-15th Century", "P - Italian 16th & 17th Century"]
-            } else if geo.contains("netherlands") || geo.contains("flemish") {
-                return ["P - Dutch & Flemish 17th Century"]
+                return [
+                    "P - Italian 15th Century and earlier",
+                    "P - Italian 16th & 17th Century",
+                    "P - Italian 18th Century"
+                ]
+            } else if geo.contains("netherlands") || geo.contains("dutch") {
+                return ["P - Netherlandish-Dutch"]
+            } else if geo.contains("flemish") || geo.contains("belgium") {
+                return ["P - Netherlandish-Flemish"]
             } else if geo.contains("england") || geo.contains("british") {
-                return ["P - British 18th & 19th Century"]
+                return ["P - British before 1800", "Mod Euro - Painting 1800-1960"]
+            } else if geo.contains("german") {
+                return ["P - German before 1800", "Mod Euro - Painting 1800-1960"]
             }
         }
         
-        // All painting collections
+        // All painting collections - using CMA's actual collection names
         return [
             "American - Painting",
-            "P - Italian 14th-15th Century",
+            "P - Italian 15th Century and earlier",
             "P - Italian 16th & 17th Century",
-            "P - Northern European 15th & 16th Century",
-            "P - Dutch & Flemish 17th Century",
-            "P - French & Spanish 17th & 18th Century",
-            "P - British 18th & 19th Century",
+            "P - Italian 18th Century",
+            "P - Netherlandish-Dutch",
+            "P - Netherlandish-Flemish",
+            "P - French & Austria 16th C. and earlier",
+            "P - French 17th Century",
+            "P - French 18th Century",
+            "P - Spanish before 1800",
+            "P - British before 1800",
+            "P - German before 1800",
+            "P - Miscellaneous",
             "Mod Euro - Painting 1800-1960"
         ]
     }

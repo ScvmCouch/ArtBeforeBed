@@ -52,12 +52,14 @@ struct CarouselView: UIViewControllerRepresentable {
         }
         
         func carouselCanSwipePrevious() -> Bool {
-            parent.vm.canGoBackInHistory
+            // Only allow swipe back if we have the image ready
+            parent.vm.canGoBackInHistory && parent.vm.prevImage != nil
         }
         
         func carouselCanSwipeNext() -> Bool {
-            // Allow swipe if we have either the image ready OR the artwork ready to load
-            parent.vm.nextImage != nil || parent.vm.hasNextArtwork
+            // CRITICAL FIX: Only allow swipe if the image is actually ready
+            // This prevents swiping to black screens when metadata is loaded but image isn't
+            parent.vm.nextImage != nil
         }
         
         func carouselGetCurrentImage() -> UIImage? {
@@ -238,8 +240,11 @@ class CarouselViewController: UIViewController, UIScrollViewDelegate {
         
         // Normal update - only if centered and no pending
         let pageWidth = view.bounds.width
-        let currentPage = pageWidth > 0 ? Int(round(pagingScrollView.contentOffset.x / pageWidth)) : 1
+        guard pageWidth > 0 else { return }
         
+        let currentPage = Int(round(pagingScrollView.contentOffset.x / pageWidth))
+        
+        // Only update images if we're centered on the current page
         if currentPage == 1 && pendingNavigation.isNone {
             applyImages(prev: prev, current: current, next: next)
         }
@@ -252,39 +257,25 @@ class CarouselViewController: UIViewController, UIScrollViewDelegate {
     }
     
     private func recenter() {
-        let pageWidth = view.bounds.width
-        guard pageWidth > 0 else { return }
-        
+        guard !isResetting else { return }
         isResetting = true
-        pagingScrollView.setContentOffset(CGPoint(x: pageWidth, y: 0), animated: false)
-        isResetting = false
-        
-        // Reset zoom on the current image when we navigate
-        currentZoomView.resetZoom()
-        updatePagingEnabled()
-    }
-    
-    // MARK: - UIScrollViewDelegate (for paging)
-    
-    func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        guard scrollView == pagingScrollView, !isResetting else { return }
         
         let pageWidth = view.bounds.width
-        guard pageWidth > 0 else { return }
-        
-        let offset = scrollView.contentOffset.x
-        
-        // Resistance at edges
-        if offset < pageWidth && !(delegate?.carouselCanSwipePrevious() ?? false) {
-            let resistance: CGFloat = 0.3
-            scrollView.contentOffset.x = pageWidth - (pageWidth - offset) * resistance
+        guard pageWidth > 0 else {
+            isResetting = false
+            return
         }
         
-        if offset > pageWidth && !(delegate?.carouselCanSwipeNext() ?? false) {
-            let resistance: CGFloat = 0.3
-            scrollView.contentOffset.x = pageWidth + (offset - pageWidth) * resistance
-        }
+        // Reset zoom on the current image
+        currentZoomView.resetZoom()
+        
+        // Snap back to center page
+        pagingScrollView.setContentOffset(CGPoint(x: pageWidth, y: 0), animated: false)
+        
+        isResetting = false
     }
+    
+    // MARK: - UIScrollViewDelegate
     
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         guard scrollView == pagingScrollView else { return }
@@ -333,6 +324,7 @@ class CarouselViewController: UIViewController, UIScrollViewDelegate {
             startPendingTimeout()
             
         } else if page != 1 {
+            // Can't navigate - bounce back to center
             recenter()
         }
     }
